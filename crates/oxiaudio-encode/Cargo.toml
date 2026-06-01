@@ -1,0 +1,32 @@
+[package]
+name = "oxiaudio-encode"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Pure-Rust audio encoders (WAV via hound, FLAC via flacenc) for OxiAudio"
+categories = ["multimedia::audio"]
+keywords = ["audio", "encode", "wav", "flac", "pure-rust"]
+
+[features]
+mp3 = ["dep:oxiaudio-encode-mp3-lame", "oxiaudio-encode-mp3-lame/mp3-encode-lame"]
+
+[dependencies]
+oxiaudio-core = { workspace = true }
+hound = { workspace = true }
+flacenc = { workspace = true }
+rayon = { workspace = true }
+oxifft = { workspace = true }
+oxiaudio-encode-mp3-lame = { workspace = true, optional = true }
+
+[dev-dependencies]
+hound = { workspace = true }
+oxiaudio-core = { workspace = true }
+oxiaudio-decode = { path = "../oxiaudio-decode" }
+criterion = { workspace = true }
+
+[[bench]]
+name = "encode_bench"
+harness = false

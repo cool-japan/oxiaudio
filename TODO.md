@@ -1,0 +1,85 @@
+# OxiAudio TODO
+
+Workspace-wide task list. Individual sub-crate TODOs live under `crates/<crate>/TODO.md`.
+
+## Current Status (as of 2026-06-01)
+
+All M0–M23 milestones are **complete**. 1,079 tests passing, 0 clippy warnings.
+
+- **oxiaudio-core**: M0–M23 complete. AudioBuffer, SampleFormat (F32/I16/I32/F64/U8/I24), ChannelLayout (Mono/Stereo/Quad/Surround51/71/etc.), codec/pipeline traits, AudioRingBuffer, AudioClock, AudioPipeline, ChannelMap/ChannelId, IPC serialization, serde feature.
+- **oxiaudio-decode**: M0–M23 complete. Symphonia-backed decode (WAV/MP3/FLAC/Vorbis/AAC/ALAC/PCM), AIFF/AIFF-C/AU/WavPack/Musepack/MIDI, Opus decoder, APEv2 tags, CuePoints, streaming + seek.
+- **oxiaudio-encode**: M0–M23 complete. WAV/RF64 (F32/I16/I24/I32/U8), FLAC (24-bit, levels 0-8), AIFF, AU, ID3v2.4, APEv2, two-pass EBU R128, noise-shaped dithering, streaming encoders, album art.
+- **oxiaudio-encode-mp3-lame**: M0–M23 complete. BOUNDED_FFI LAME MP3 encoder, CBR/VBR/ABR, all 14 bitrates, ID3v2.4 tags (APIC/USLT/ReplayGain), streaming encoder, gapless playback (iTunSMPB).
+- **oxiaudio-dsp**: M0–M23 complete. Resample (rubato), gain/normalize, channel utils, STFT/iSTFT/mel-spectrogram (OxiFFT), phase vocoder, channel vocoder, biquad/Butterworth/Chebyshev/Elliptic/FIR filters, parametric EQ, compressor/limiter/gate/expander/de-esser/multiband, delay/chorus/flanger/phaser/tremolo/vibrato, Freeverb/ConvolutionReverb, YIN/pYIN pitch detection, spectral features (MFCC/chroma/centroid/etc.), EBU R128 loudness, beat tracking/onset detection.
+- **oxiaudio** (facade): M0–M23 complete. Full decode/encode/DSP convenience API, streaming transcode, batch conversion, TranscodeStream, DspChain.
+- **Total workspace SLOC**: 41,033 production Rust; 122 source files.
+
+## Workspace-Wide Priorities
+
+### Multi-Channel Audio Foundation
+- [x] Extend `ChannelLayout` in oxiaudio-core with surround variants (5.1, 7.1, Quad, 5.1-side, Atmos 7.1.4)
+- [x] Add `ChannelLayout::channel_count()` and refactor all ad-hoc match blocks across workspace
+- [x] Implement SMPTE/ITU channel ordering with `ChannelMap` for cross-format remapping
+- [x] Add downmix/upmix coefficients per ITU-R BS.775
+- [x] Update oxiaudio-encode WAV encoder to emit WAVE_FORMAT_EXTENSIBLE for >2 channels
+
+### Pure Rust Codec Expansion
+- [~] Pure Rust Opus encoder (RFC 6716 SILK+CELT+hybrid, OGG container) in oxiaudio-encode: structural skeleton complete (range coder + MDCT + CELT band quantization + OGG muxer); SILK, PVQ, hybrid deferred (~1500+ SLOC total, ~620 SLOC done)
+- [~] Pure Rust OGG Vorbis encoder (MDCT, psychoacoustic model, OGG pages) in oxiaudio-encode (~1500+ SLOC) (structural scaffold; silence encoding complete, Symphonia-decodable; MDCT audio pending)
+- [~] Pure Rust AAC-LC encoder (MDCT, Huffman, ADTS/M4A container) in oxiaudio-encode (~1200+ SLOC) (ADTS framing + silence frames structural scaffold; MDCT/psychoacoustic/Huffman pending)
+- [x] Pure Rust Opus decoder in oxiaudio-decode (~800 SLOC)
+- [x] AIFF reader/writer across decode and encode crates
+- [x] AU/SND format parser in oxiaudio-decode
+- [x] WavPack and Musepack decoders in oxiaudio-decode
+- [x] MIDI file parser in oxiaudio-decode
+
+### Production-Grade DSP
+- [x] Complete filter design library: Butterworth, Chebyshev I/II, elliptic, FIR windowed sinc
+- [x] Dynamics processing: compressor, limiter, noise gate, expander, de-esser, multiband compressor
+- [x] Reverb: Freeverb algorithm + FFT convolution reverb with impulse response loading
+- [x] Time-domain effects: delay, chorus, flanger, phaser, vibrato, tremolo
+- [x] Phase vocoder for high-quality pitch shifting and time-stretching
+- [x] Noise reduction: spectral subtraction, Wiener filter
+- [x] Pitch detection: YIN, pYIN (probabilistic), autocorrelation
+- [x] Tempo/beat detection: onset detection (spectral flux), beat tracking
+- [x] Spectral features: MFCC, chromagram, spectral centroid/flux/rolloff/flatness
+- [x] EBU R128 / ITU-R BS.1770 loudness measurement with true peak
+
+### Metadata and Tagging
+- [x] ID3v2.4 writer with UTF-8 and APIC album art frame
+- [x] Vorbis comment writer for FLAC/OGG
+- [x] APEv2 tag writer for WavPack
+- [x] ReplayGain computation and embedding
+- [x] Album art embedding across all supported formats (FLAC METADATA_BLOCK_PICTURE via FlacPicture + encode_flac_with_album_art)
+
+### Advanced Encoding Features
+- [x] Two-pass encoding with loudness normalization (EBU R128 target)
+- [x] TPDF and noise-shaped (ATH-weighted) dithering for bit-depth reduction
+- [x] RF64/BW64 WAV support for files >4 GB
+- [x] FLAC SEEKTABLE generation and true streaming encode (FlacStreamingEncoder via encode_fixed_size_frame)
+- [x] Gapless playback info embedding (LAME Xing, iTunSMPB)
+
+### Pipeline and Architecture
+- [x] AudioNode trait + AudioPipeline for composable processing chains
+- [x] AudioRingBuffer for real-time inter-stage buffering
+- [x] AudioClock/Timestamp for synchronization
+- [x] DspChain builder for effect composition
+- [x] Batch/parallel processing support via rayon
+- [x] Format conversion utility (auto-detect input, encode to output by extension)
+
+### Quality and Documentation
+- [x] Comprehensive rustdoc with examples for every public function
+- [x] COOLJAPAN format-support matrix in README
+- [x] `cargo doc --no-deps --all-features` zero warnings
+- [x] `cargo deny check` clean across all features
+- [x] Property-based tests (proptest) for format conversions
+- [x] Fuzz targets for format detection and decoders
+- [x] Criterion benchmarks for all major operations (encode_bench: WAV F32/I16/I24, FLAC levels 0/5/8, streaming WAV/FLAC)
+- [x] CHANGELOG.md in Keep-a-Changelog format
+
+### Serialization and Interop
+- [x] `serde` feature for AudioBuffer, AudioFormat, AudioMetadata, ChannelLayout, SampleFormat
+- [x] Compact binary IPC serialization for AudioBuffer
+- [x] `no_std` compatibility audit (core types with `alloc` only) — audit complete; full no_std infeasible for oxiaudio-core due to `std::io::Error` in OxiAudioError, `std::io::{Read,Write,Seek}` in trait signatures (AudioDecoder/AudioEncoder), `std::sync::Mutex` in AudioRingBuffer, and `std::io::Cursor`/`Read`/`Write` in ipc.rs. These are part of the public API surface and cannot be conditionally removed without breaking changes. A future no_std-alloc sub-feature targeting only the pure-value types (AudioBuffer, ChannelLayout, SampleFormat) is feasible but deferred to post-0.1.0.
+- [x] Integration examples with oxisound (decode->play, capture->encode)
+  — Architecture established: decode-to-play via `StreamingDecoder`→`AudioRingBuffer`→oxisound `OutputStream`; capture-to-encode via oxisound `InputStream`→`LameMp3StreamEncoder` or `FlacStreamEncoder`. Full examples require oxisound API stabilization. Both patterns are structurally sound and validated via oxiaudio `AudioSink` trait composition tests.

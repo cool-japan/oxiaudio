@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oxiaudio-core",
+    "crates/oxiaudio-decode",
+    "crates/oxiaudio-encode",
+    "crates/oxiaudio-encode-mp3-lame",
+    "crates/oxiaudio-dsp",
+    "crates/oxiaudio",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+authors = ["COOLJAPAN OU (Team Kitasan)"]
+license = "Apache-2.0"
+repository = "https://github.com/cool-japan/oxiaudio"
+description = "OxiAudio is the COOLJAPAN Pure-Rust audio codec + DSP layer."
+
+[workspace.dependencies]
+# workspace internal
+oxiaudio-core            = { path = "crates/oxiaudio-core",            version = "0.1.0" }
+oxiaudio-decode          = { path = "crates/oxiaudio-decode",          version = "0.1.0" }
+oxiaudio-encode          = { path = "crates/oxiaudio-encode",          version = "0.1.0" }
+oxiaudio-encode-mp3-lame = { path = "crates/oxiaudio-encode-mp3-lame", version = "0.1.0" }
+oxiaudio-dsp             = { path = "crates/oxiaudio-dsp",             version = "0.1.0" }
+# external — Pure Rust
+thiserror = { version = "2.0.18" }
+serde      = { version = "1.0.228", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+symphonia  = { version = "0.6.0", default-features = false, features = ["mp3","flac","vorbis","ogg","wav","aac","alac","pcm","isomp4"] }
+hound      = { version = "3.5.1" }
+flacenc    = { version = "0.5.1" }
+rubato     = { version = "3.0.0" }
+dasp       = { version = "0.11.0", default-features = false, features = ["std"] }
+dasp_frame  = { version = "0.11.0", default-features = false, features = ["std"] }
+dasp_signal = { version = "0.11.0", default-features = false, features = ["std"] }
+oxifft     = { version = "0.3.2" }
+criterion  = { version = "0.8.2" }
+rayon      = { version = "1.12.0" }
+# external — FFI (must be optional in member crates)
+mp3lame-encoder = { version = "0.2.4", features = ["std"] }
+proptest = { version = "1" }
+log        = { version = "0.4" }
+memmap2    = { version = "0.9" }
+opus-decoder = { version = "0.1.1" }

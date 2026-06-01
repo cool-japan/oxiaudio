@@ -1,0 +1,21 @@
+[advisories]
+ignore = []
+
+[licenses]
+allow = ["Apache-2.0", "MIT", "ISC", "Unicode-3.0", "BSD-2-Clause", "BSD-3-Clause", "OpenSSL", "MPL-2.0", "Zlib"]
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+deny = [
+  { name = "minimp3-sys" },
+  { name = "mad-sys" },
+  { name = "flac-sys" },
+  { name = "flac-bound" },
+  { name = "vorbis-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

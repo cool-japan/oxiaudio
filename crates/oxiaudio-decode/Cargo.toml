@@ -1,0 +1,37 @@
+[package]
+name = "oxiaudio-decode"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Symphonia-backed audio decoder for OxiAudio"
+categories = ["multimedia::audio"]
+keywords = ["audio", "decode", "symphonia", "pure-rust", "cooljapan"]
+
+[features]
+## Enable memory-mapped file I/O path for `decode_file_mmap`.
+## Requires a single targeted `unsafe` block for `memmap2::Mmap::map`; all other code
+## in this crate remains covered by `#![deny(unsafe_code)]`.
+mmap = ["dep:memmap2"]
+## Enable the pure-Rust OGG Opus decoder backed by `opus-decoder`.
+opus = ["dep:opus-decoder"]
+
+[dependencies]
+oxiaudio-core  = { workspace = true }
+symphonia      = { workspace = true }
+log            = { workspace = true }
+oxifft         = { workspace = true }
+memmap2        = { workspace = true, optional = true }
+opus-decoder   = { workspace = true, optional = true }
+
+[dev-dependencies]
+hound           = { workspace = true }
+criterion       = { workspace = true }
+# temporarily removed for publish (circular/forward dev-dep); restore after publish complete
+# oxiaudio-encode = { workspace = true }
+
+[[bench]]
+name = "decode_bench"
+harness = false

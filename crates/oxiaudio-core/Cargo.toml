@@ -1,0 +1,27 @@
+[package]
+name = "oxiaudio-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Core traits and types for OxiAudio"
+categories = ["multimedia::audio"]
+keywords = ["audio", "codec", "pure-rust", "cooljapan", "oxiaudio"]
+
+[features]
+serde = ["dep:serde"]
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "buffer_bench"
+harness = false

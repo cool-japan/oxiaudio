@@ -1,0 +1,31 @@
+[package]
+name = "oxiaudio-dsp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Pure-Rust DSP (resampling, gain, spectral) for OxiAudio"
+categories = ["multimedia::audio"]
+keywords = ["dsp", "resample", "audio", "pure-rust", "cooljapan"]
+
+[features]
+## Enable the `dasp_signal` adapter: exposes `MonoSignal` and `StereoSignal` types
+## that wrap `AudioBuffer<f32>` and implement `dasp::Signal`.
+dasp = ["dep:dasp_frame", "dep:dasp_signal"]
+
+[dependencies]
+oxiaudio-core = { workspace = true }
+rubato = { workspace = true }
+oxifft = { workspace = true, features = ["streaming"] }
+dasp_frame  = { workspace = true, optional = true }
+dasp_signal = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+
+[[bench]]
+name = "dsp_bench"
+harness = false

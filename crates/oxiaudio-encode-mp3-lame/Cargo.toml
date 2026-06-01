@@ -1,0 +1,29 @@
+[package]
+name = "oxiaudio-encode-mp3-lame"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "OxiAudio MP3 encoder adapter — BOUNDED_FFI: links libmp3lame (LGPL); use requires opt-in feature"
+categories = ["multimedia::audio"]
+keywords = ["mp3", "encode", "lame", "ffi", "audio"]
+
+[features]
+mp3-encode-lame = ["dep:mp3lame-encoder"]
+
+[dependencies]
+oxiaudio-core = { workspace = true }
+mp3lame-encoder = { workspace = true, optional = true, features = ["std"] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+hound = { workspace = true }
+oxiaudio-decode = { workspace = true }
+oxiaudio-dsp = { workspace = true }
+
+[[bench]]
+name = "mp3_bench"
+harness = false
+required-features = ["mp3-encode-lame"]
