@@ -25,6 +25,7 @@ oxiaudio-encode-mp3-lame = { workspace = true, optional = true }
 hound = { workspace = true }
 oxiaudio-core = { workspace = true }
 oxiaudio-decode = { path = "../oxiaudio-decode" }
+oxiaudio-dsp = { path = "../oxiaudio-dsp" }
 criterion = { workspace = true }
 
 [[bench]]

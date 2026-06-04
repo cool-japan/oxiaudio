@@ -132,6 +132,15 @@ impl OpusDecoder {
         Ok(dec)
     }
 
+    /// Returns the range coder's final range value, for conformance testing.
+    ///
+    /// Exposes the `OPUS_GET_FINAL_RANGE` diagnostic value from the underlying
+    /// `opus-decoder` crate, which matches the encoder's `final_range()` on a
+    /// correct round-trip.
+    pub fn final_range(&self) -> u32 {
+        self.inner.final_range()
+    }
+
     /// Decode a single raw Opus packet to f32 PCM samples (interleaved if stereo).
     ///
     /// Pre-skip samples are consumed internally and do not appear in the output.

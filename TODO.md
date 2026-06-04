@@ -2,9 +2,14 @@
 
 Workspace-wide task list. Individual sub-crate TODOs live under `crates/<crate>/TODO.md`.
 
-## Current Status (as of 2026-06-01)
+## Current Status (as of 2026-06-04, v0.1.1)
 
-All M0–M23 milestones are **complete**. 1,079 tests passing, 0 clippy warnings.
+All M0–M23 milestones are **complete**. 1,109 tests passing, 0 clippy warnings.
+
+Recent fixes (2026-06-03b):
+- Fixed dead-code clippy error in `oxiaudio-decode`: removed unused `window_shape` and `scale_factor_grouping` fields from `IcsInfo` struct (fields are now parsed as local variables and discarded after bitstream-advance; derived `num_window_groups`/`window_group_length` already capture all needed information).
+- Implemented large-band V(N,K) u64 overflow guard for CELT PVQ in `oxiaudio-encode`: `ncwrs_urow` now uses `overflowing_add`/`checked_add` with an `overflowed` flag; when triggered, `encode_pulses` falls back to u64 wide path (`ncwrs_urow_u64`, `icwrs_u64`, `enc_uint_u64`). V(22,20)=853,941,394,691,792 tested exact; V(22,88) saturation guard tested no-panic.
+- Marked completed analysis items as `[x]` in oxiaudio-dsp and oxiaudio facade TODO files.
 
 - **oxiaudio-core**: M0–M23 complete. AudioBuffer, SampleFormat (F32/I16/I32/F64/U8/I24), ChannelLayout (Mono/Stereo/Quad/Surround51/71/etc.), codec/pipeline traits, AudioRingBuffer, AudioClock, AudioPipeline, ChannelMap/ChannelId, IPC serialization, serde feature.
 - **oxiaudio-decode**: M0–M23 complete. Symphonia-backed decode (WAV/MP3/FLAC/Vorbis/AAC/ALAC/PCM), AIFF/AIFF-C/AU/WavPack/Musepack/MIDI, Opus decoder, APEv2 tags, CuePoints, streaming + seek.
@@ -24,9 +29,12 @@ All M0–M23 milestones are **complete**. 1,079 tests passing, 0 clippy warnings
 - [x] Update oxiaudio-encode WAV encoder to emit WAVE_FORMAT_EXTENSIBLE for >2 channels
 
 ### Pure Rust Codec Expansion
-- [~] Pure Rust Opus encoder (RFC 6716 SILK+CELT+hybrid, OGG container) in oxiaudio-encode: structural skeleton complete (range coder + MDCT + CELT band quantization + OGG muxer); SILK, PVQ, hybrid deferred (~1500+ SLOC total, ~620 SLOC done)
-- [~] Pure Rust OGG Vorbis encoder (MDCT, psychoacoustic model, OGG pages) in oxiaudio-encode (~1500+ SLOC) (structural scaffold; silence encoding complete, Symphonia-decodable; MDCT audio pending)
-- [~] Pure Rust AAC-LC encoder (MDCT, Huffman, ADTS/M4A container) in oxiaudio-encode (~1200+ SLOC) (ADTS framing + silence frames structural scaffold; MDCT/psychoacoustic/Huffman pending)
+- [~] Pure Rust Opus encoder (RFC 6716 SILK+CELT+hybrid, OGG container) in oxiaudio-encode: structural skeleton complete (range coder + MDCT + CELT band quantization + OGG muxer); SILK, PVQ, hybrid deferred (~1500+ SLOC total, ~650 SLOC done)
+  - **Refinement (2026-06-03):** RFC conformance slice completed: `opus_range.rs` fully rewritten as bit-exact `ec_enc` (carry-buffer, end-packed raw bits, `final_range()`); `opus_pvq.rs` added with exact CWRS `icwrs`/`encode_pulses` (exhaustive N≤4 K≤2 roundtrip verified); final-range equality confirmed against in-crate EcDec mirrors (13 range tests, 4 PVQ tests all pass). Large-band V(N,K) overflow guard + full CELT-frame decodability in next run.
+  - **Refinement (2026-06-03b):** Large-band V(N,K) u64 overflow guard implemented. `ncwrs_urow` now detects u32 overflow via `overflowing_add`; `encode_pulses` falls back to `ncwrs_urow_u64`/`icwrs_u64`/`enc_uint_u64` for V(N,K) > u32::MAX. 5 new PVQ tests. Remaining: SILK conformance + hybrid 8 kHz crossover filter.
+- [x] Pure Rust OGG Vorbis encoder (MDCT, psychoacoustic model, OGG pages) in oxiaudio-encode (~1500+ SLOC) — Vorbis window, 4 canonical codebooks (floor1 class+value, residue class+VQ), 8 X-post floor1 with correct 8-bit subbook fields, residue type-0 with correct nonzero book indices, closed-loop floor synthesis. Gate: symphonia decode returns Ok with non-empty PCM. SNR ≥20 dB deferred to future run.
+  - **Refinement (2026-06-03):** Setup header rewrite complete: floor1 subbook=8b, residue book=3 (nonzero, <max_codebook), canonical_codewords ported from symphonia, Vorbis window implemented. Symphonia decode gate: PASS (5/5 roundtrip tests pass, 1 SNR test ignored).
+- [x] Pure Rust AAC-LC encoder (MDCT, Huffman, ADTS/M4A container) in oxiaudio-encode (~1200+ SLOC) — 7-bit grouping fixed, SFB tables unified, ISO quantizer, section_data parsing, Symphonia ADTS/M4A decode gate passed, in-tree SNR ≥20 dB
 - [x] Pure Rust Opus decoder in oxiaudio-decode (~800 SLOC)
 - [x] AIFF reader/writer across decode and encode crates
 - [x] AU/SND format parser in oxiaudio-decode

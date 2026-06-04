@@ -309,7 +309,9 @@ fn write_ics_silence(bw: &mut BitWriter) {
     bw.write_bits(0, 2); // window_sequence = ONLY_LONG_SEQUENCE
     bw.write_bits(0, 1); // window_shape    = SINE_WINDOW
     bw.write_bits(1, 6); // max_sfb = 1
-    bw.write_bits(0, 7); // scale_factor_grouping (long window → 7 bits, all 0)
+                         // NOTE: scale_factor_grouping (7 bits) is ONLY written for EIGHT_SHORT_SEQUENCE.
+                         // For ONLY_LONG_SEQUENCE (window_sequence=0), this field does NOT exist per ISO 14496-3.
+                         // DO NOT write these 7 bits here.
     bw.write_bits(0, 1); // predictor_data_present = 0
 
     // section_data: 1 section covering 1 SFB with ZERO_HCB
@@ -332,7 +334,13 @@ fn write_ics_silence(bw: &mut BitWriter) {
 
 /// ISO 14496-3 §4.6.2.3.4 spectral coefficient quantization.
 ///
-/// `inv_scale = 1.0 / 2^(0.25 * (global_gain - 100 - 16))`
+/// Standard formula: `q = nint(sign(x) * (|x| / scale)^(3/4))`
+/// where `scale = 2^(0.25 * (global_gain - 100))`.
+///
+/// Equivalently: `q = nint(|x|^0.75 * scale^(-3/4))`
+///             = `nint(|x|^0.75 * 2^(-3*(global_gain - 100)/16))`
+///
+/// `inv_scale = 2^(-3*(global_gain - 100)/16)` = `scale^(-3/4)`.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -348,10 +356,18 @@ fn quantize_coeff(x: f32, inv_scale: f32) -> i16 {
     }
 }
 
-/// Compute global_gain and inverse quantization scale from MDCT peak.
+/// Compute global_gain and the quantization `inv_scale` from MDCT peak.
 ///
-/// Returns `(127, 0.0)` for near-silence. Otherwise chooses a gain such that
-/// the peak coefficient maps to approximately 8191 (max 13-bit quantized value).
+/// Uses the ISO 14496-3 standard formula.
+/// `scale = 2^(0.25*(gain-100))` is the dequantization scale.
+/// `inv_scale = scale^(-3/4) = 2^(-3*(gain-100)/16)` is the quantization divisor.
+///
+/// For target: `peak^0.75 * inv_scale ≈ 8191`
+///   → `inv_scale = 8191 / peak^0.75`
+///   → `2^(-3*(gain-100)/16) = 8191 / peak^0.75`
+///   → `gain = 100 - (16/3) * log2(8191 / peak^0.75)`
+///
+/// Returns `(127, 0.0)` for near-silence.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -364,10 +380,11 @@ fn compute_global_gain_and_inv_scale(mdct: &[f32]) -> (u8, f32) {
     }
     let target_q = 8191.0_f32;
     let peak_q = peak.powf(0.75);
-    let gain_f = 100.0_f32 + 16.0 - 4.0 * (target_q / peak_q).log2();
+    // gain = 100 - (16/3) * log2(target_q / peak_q)
+    let gain_f = 100.0_f32 - (16.0 / 3.0) * (target_q / peak_q).log2();
     let gain = gain_f.round().clamp(1.0, 255.0) as u8;
-    let scale = 2.0_f32.powf(0.25 * (gain as f32 - 100.0 - 16.0));
-    let inv_scale = 1.0 / scale;
+    // inv_scale = 2^(-3*(gain-100)/16) = scale^(-3/4) where scale = 2^(0.25*(gain-100))
+    let inv_scale = 2.0_f32.powf(-3.0 * (gain as f32 - 100.0) / 16.0);
     (gain, inv_scale)
 }
 
@@ -385,6 +402,8 @@ fn compute_global_gain_and_inv_scale(mdct: &[f32]) -> (u8, f32) {
 fn write_esc_word(bw: &mut BitWriter, abs_val: u16) {
     // abs_val >= 16 guaranteed by caller.
     // n = floor(log2(abs_val)) - 4
+    // leading_zeros() of u16 is in [0, 16]; truncation to u8 is safe.
+    #[allow(clippy::cast_possible_truncation)]
     let leading = abs_val.leading_zeros() as u8;
     // 16-bit integer: bit position of MSB = 15 - leading_zeros
     // floor(log2(abs_val)) = 15 - leading_zeros (when abs_val >= 1)
@@ -417,10 +436,10 @@ fn encode_esc_pair(bw: &mut BitWriter, v0: i16, v1: i16) {
     bw.write_bits(code as u64, len);
     // Sign bits for nonzero values (1 = negative, 0 = positive)
     if v0 != 0 {
-        bw.write_bits(if v0 < 0 { 1 } else { 0 }, 1);
+        bw.write_bits(u64::from(v0 < 0), 1);
     }
     if v1 != 0 {
-        bw.write_bits(if v1 < 0 { 1 } else { 0 }, 1);
+        bw.write_bits(u64::from(v1 < 0), 1);
     }
     // ESC words for clamped values
     if a0 == 16 {
@@ -514,7 +533,9 @@ fn write_ics_with_data(
     bw.write_bits(0, 2); // window_sequence = ONLY_LONG_SEQUENCE
     bw.write_bits(0, 1); // window_shape = SINE_WINDOW
     bw.write_bits(n_sfbs as u64, 6); // max_sfb
-    bw.write_bits(0, 7); // scale_factor_grouping (long window → 7 bits, all 0)
+                                     // NOTE: scale_factor_grouping (7 bits) is ONLY written for EIGHT_SHORT_SEQUENCE.
+                                     // For ONLY_LONG_SEQUENCE (window_sequence=0), this field does NOT exist per ISO 14496-3.
+                                     // DO NOT write these 7 bits here.
     bw.write_bits(0, 1); // predictor_data_present = 0
 
     // Quantize all coefficients.
@@ -836,20 +857,20 @@ pub fn aac_mdct_forward(samples: &[f32]) -> Vec<f32> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Scale factor utility (legacy, kept for backward compatibility)
+// Scale factor utility (test-only, kept for backward compatibility)
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Compute the `global_gain` byte for a frame given its MDCT coefficients.
 ///
 /// Returns a value in `1..=255`; silence (peak < 1e-6) returns 127.
 /// This function is used in tests for backward compatibility.
+#[cfg(test)]
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::cast_precision_loss,
-    dead_code
+    clippy::cast_precision_loss
 )]
-pub fn compute_global_gain(mdct: &[f32]) -> u8 {
+fn compute_global_gain(mdct: &[f32]) -> u8 {
     let peak = mdct.iter().fold(0.0f32, |a, &x| a.max(x.abs()));
     if peak < 1e-6 {
         return 127;
@@ -1144,8 +1165,10 @@ fn levinson_durbin(r: &[f32], order: usize) -> (Vec<f32>, f32) {
 }
 
 /// Quantize one TNS LPC coefficient to 4-bit signed (range -8..=7).
+#[allow(clippy::cast_possible_truncation)]
 fn quantize_tns_coef(c: f32) -> i8 {
     let clamped = c.clamp(-1.0, 1.0);
+    // After .round().clamp(-8.0, 7.0), the value is an integer in [-8, 7] — fits in i8.
     (clamped.asin() * 8.0 / std::f32::consts::PI)
         .round()
         .clamp(-8.0, 7.0) as i8

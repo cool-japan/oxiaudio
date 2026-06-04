@@ -28,38 +28,96 @@ const SAMPLING_FREQ_TABLE: [u32; 13] = [
 
 // ─── SFB offset tables (ISO 14496-3 Table 4.138) ─────────────────────────────
 
-/// Scale-factor band boundaries for 44100 Hz long window.
-const SFB_LONG_44100: &[usize] = &[
-    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 96, 112, 128, 144, 160, 192, 224,
-    256, 288, 320, 384, 448, 512, 576, 640, 768, 896, 1024,
-];
+// ─── Canonical SFB offset tables matching the encoder (ISO 14496-3 Table 4.138) ─
+//
+// These tables MUST match the encoder's tables exactly (in aac.rs) for the
+// encoder/decoder to share the same spectral topology. The encoder uses the
+// Symphonia-compatible threshold-based lookup; we replicate the same tables here.
 
-/// Scale-factor band boundaries for 48000 Hz long window.
+/// 48 kHz long window: 49 SFBs (indices 0..48), 50 boundary entries.
 const SFB_LONG_48000: &[usize] = &[
-    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 96, 112, 128, 144, 160, 192, 224,
-    256, 288, 320, 384, 448, 512, 576, 640, 768, 896, 1024,
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 88, 96, 108, 120, 132, 144, 160,
+    176, 196, 216, 240, 264, 292, 320, 352, 384, 416, 448, 480, 512, 544, 576, 608, 640, 672, 704,
+    736, 768, 800, 832, 864, 896, 928, 1024,
 ];
 
-/// Scale-factor band boundaries for 32000 Hz long window.
+/// 32 kHz long window: 51 SFBs, 52 boundary entries.
 const SFB_LONG_32000: &[usize] = &[
-    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 96, 112, 128, 160, 192, 224, 256,
-    288, 320, 384, 448, 512, 576, 640, 768, 896, 1024,
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 88, 96, 108, 120, 132, 144, 160,
+    176, 196, 216, 240, 264, 292, 320, 352, 384, 416, 448, 480, 512, 544, 576, 608, 640, 672, 704,
+    736, 768, 800, 832, 864, 896, 928, 960, 992, 1024,
 ];
 
-/// Scale-factor band boundaries for 22050 / 24000 Hz long window.
-const SFB_LONG_22050: &[usize] = &[
-    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 96, 112, 128, 144, 160, 192, 224,
-    256, 288, 320, 384, 448, 512, 576, 640, 768, 896, 1024,
+/// 24 kHz / 22.05 kHz long window: 47 SFBs, 48 boundary entries.
+const SFB_LONG_24000: &[usize] = &[
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 52, 60, 68, 76, 84, 92, 100, 108, 116, 124, 136,
+    148, 160, 172, 188, 204, 220, 240, 260, 284, 308, 336, 364, 396, 432, 468, 508, 552, 600, 652,
+    704, 768, 832, 896, 960, 1024,
+];
+
+/// 16 kHz long window: 43 SFBs, 44 boundary entries.
+const SFB_LONG_16000: &[usize] = &[
+    0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 100, 112, 124, 136, 148, 160, 172, 184, 196, 212,
+    228, 244, 260, 280, 300, 320, 344, 368, 396, 424, 456, 492, 532, 572, 616, 664, 716, 772, 832,
+    896, 960, 1024,
+];
+
+/// 64 kHz long window: 47 SFBs, 48 boundary entries.
+const SFB_LONG_64000: &[usize] = &[
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 64, 72, 80, 88, 100, 112, 124, 140,
+    156, 172, 192, 216, 240, 268, 304, 344, 384, 424, 464, 504, 544, 584, 624, 664, 704, 744, 784,
+    824, 864, 904, 944, 984, 1024,
+];
+
+/// 96 kHz / 88.2 kHz long window: 41 SFBs, 42 boundary entries.
+const SFB_LONG_96000: &[usize] = &[
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 64, 72, 80, 88, 96, 108, 120, 132,
+    144, 156, 172, 188, 212, 240, 276, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024,
+];
+
+/// 8 kHz long window: 40 SFBs, 41 boundary entries.
+const SFB_LONG_8000: &[usize] = &[
+    0, 12, 24, 36, 48, 60, 72, 84, 96, 108, 120, 132, 144, 156, 172, 188, 204, 220, 236, 252, 268,
+    288, 308, 328, 348, 372, 396, 420, 448, 476, 508, 544, 580, 620, 664, 712, 764, 820, 880, 944,
+    1024,
 ];
 
 /// Returns the SFB offset table for the given sample rate (long window).
+///
+/// Thresholds match the encoder's `sfb_offsets()` function exactly.
 fn sfb_offsets_long(sample_rate: u32) -> &'static [usize] {
-    match sample_rate {
-        48000 => SFB_LONG_48000,
-        44100 => SFB_LONG_44100,
-        32000 => SFB_LONG_32000,
-        _ => SFB_LONG_22050,
+    // Thresholds in descending order (same as encoder):
+    //  92017 → 96K table  (96 kHz / 88.2 kHz)
+    //  75132 → 96K table
+    //  55426 → 64K table  (64 kHz)
+    //  46009 → 48K table  (48 kHz)
+    //  37566 → 48K table  (44.1 kHz)
+    //  27713 → 32K table  (32 kHz)
+    //  23004 → 24K table  (24 kHz)
+    //  18783 → 24K table  (22.05 kHz)
+    //  13856 → 16K table  (16 kHz)
+    //  11502 → 16K table  (12 kHz)
+    //   9391 → 16K table  (11.025 kHz)
+    //      0 →  8K table  (8 kHz)
+    const THRESHOLDS: [(u32, &[usize]); 11] = [
+        (92017, SFB_LONG_96000),
+        (75132, SFB_LONG_96000),
+        (55426, SFB_LONG_64000),
+        (46009, SFB_LONG_48000),
+        (37566, SFB_LONG_48000),
+        (27713, SFB_LONG_32000),
+        (23004, SFB_LONG_24000),
+        (18783, SFB_LONG_24000),
+        (13856, SFB_LONG_16000),
+        (11502, SFB_LONG_16000),
+        (9391, SFB_LONG_16000),
+    ];
+    for (min_srate, table) in THRESHOLDS {
+        if sample_rate >= min_srate {
+            return table;
+        }
     }
+    SFB_LONG_8000
 }
 
 // ─── ADTS frame ──────────────────────────────────────────────────────────────
@@ -241,12 +299,8 @@ impl<'a> BitReader<'a> {
 struct IcsInfo {
     /// 0=ONLY_LONG, 1=LONG_START, 2=EIGHT_SHORT, 3=LONG_STOP
     window_sequence: u8,
-    /// 0=sine, 1=Kaiser-Bessel (both treated as sine)
-    window_shape: u8,
     /// Number of active scale-factor bands per window.
     max_sfb: u8,
-    /// Grouping bitfield for short windows (only used for EIGHT_SHORT).
-    scale_factor_grouping: u8,
     /// 1 for long windows; 8 for short.
     num_windows: usize,
     /// Number of window groups (long: 1; short: 1–8).
@@ -263,7 +317,9 @@ struct IcsInfo {
 fn parse_ics_info(br: &mut BitReader<'_>) -> Result<IcsInfo, OxiAudioError> {
     let _ics_reserved = br.read_bool()?; // must be 0, ignored
     let window_sequence = br.read_bits(2)? as u8;
-    let window_shape = br.read_bits(1)? as u8;
+    // window_shape: 0=sine, 1=Kaiser-Bessel (both treated as sine in this implementation).
+    // Parsed to advance the bitstream; not stored since the distinction is not used.
+    let _window_shape = br.read_bits(1)?;
 
     let (num_windows, max_sfb_bits, has_grouping) = if window_sequence == 2 {
         // EIGHT_SHORT_SEQUENCE
@@ -274,16 +330,16 @@ fn parse_ics_info(br: &mut BitReader<'_>) -> Result<IcsInfo, OxiAudioError> {
 
     let max_sfb = br.read_bits(max_sfb_bits)? as u8;
 
-    let mut scale_factor_grouping = 0u8;
     let mut num_window_groups = 1usize;
     let mut window_group_length = [0usize; 8];
     window_group_length[0] = 1;
 
     if has_grouping {
-        scale_factor_grouping = br.read_bits(7)? as u8;
-        // Each '0' bit starts a new group; '1' continues the current group.
+        // scale_factor_grouping: 7-bit bitfield. Each '0' bit starts a new window
+        // group; '1' continues the current group. Parse into derived group arrays.
+        let grouping = br.read_bits(7)? as u8;
         for i in 0..7usize {
-            let bit = (scale_factor_grouping >> (6 - i)) & 1;
+            let bit = (grouping >> (6 - i)) & 1;
             if bit == 0 {
                 // New window group starts after window (i+1)
                 num_window_groups += 1;
@@ -297,11 +353,13 @@ fn parse_ics_info(br: &mut BitReader<'_>) -> Result<IcsInfo, OxiAudioError> {
         window_group_length[0] = 1;
     }
 
+    // predictor_data_present (1 bit) — always present in ics_info(), even if predictor
+    // is never used. Consume and discard (we don't support SBR prediction).
+    let _predictor_data_present = br.read_bool()?;
+
     Ok(IcsInfo {
         window_sequence,
-        window_shape,
         max_sfb,
-        scale_factor_grouping,
         num_windows,
         num_window_groups,
         window_group_length,
@@ -527,237 +585,184 @@ fn decode_sf_huffman(br: &mut BitReader<'_>) -> Result<i32, OxiAudioError> {
     Ok(0)
 }
 
-/// Decode all scale factors for one channel.
+/// Decode all scale factors for one channel, following the section_data.
 ///
-/// ISO 14496-3 §4.6.4.1: scale_factor[sfb] = scale_factor[sfb-1] + delta,
-/// with the first SFB initialised to `global_gain`.
+/// ISO 14496-3 §4.6.4.1: for each non-ZERO_HCB SFB (in section order),
+/// read one SF Huffman delta. ZERO_HCB SFBs are skipped (no code in bitstream).
+/// The scale factor accumulates: sf[n] = sf[n-1] + delta.
+/// The first non-zero SFB's SF = global_gain + delta_0.
+///
+/// Returns a Vec indexed by SFB (length = max_sfb), with each element
+/// being the absolute scale factor for that SFB (or `global_gain` for zero SFBs).
 ///
 /// # Errors
 ///
 /// Returns [`OxiAudioError::Decode`] on bitstream exhaustion.
 fn decode_scale_factors(
     br: &mut BitReader<'_>,
-    ics: &IcsInfo,
+    max_sfb: usize,
     global_gain: u8,
+    sections: &[Section],
 ) -> Result<Vec<i16>, OxiAudioError> {
-    let total_sfbs = ics.num_window_groups * ics.max_sfb as usize;
-    let mut sfs = Vec::with_capacity(total_sfbs);
+    let mut sfs = vec![i32::from(global_gain); max_sfb];
     let mut prev = i32::from(global_gain);
 
-    for _ in 0..total_sfbs {
-        let delta = decode_sf_huffman(br)?;
-        prev += delta;
-        // Clamp to a sane range to avoid overflow in dequantization.
-        let clamped = prev.clamp(-200, 255) as i16;
-        sfs.push(clamped);
+    for sect in sections {
+        let cb = sect.cb;
+        // ZERO_HCB: no scale factor read, keep global_gain for these SFBs
+        if cb == 0 {
+            continue;
+        }
+        // Non-zero codebooks: read one delta per SFB in this section.
+        // Split into in-range SFBs (written to sfs) and out-of-range SFBs (delta consumed only).
+        let end = sect.sfb_end.min(max_sfb);
+        let start = sect.sfb_start.min(max_sfb);
+        for slot in &mut sfs[start..end] {
+            let delta = decode_sf_huffman(br)?;
+            prev += delta;
+            // Clamp to sane range
+            *slot = prev.clamp(-200, 255);
+        }
+        // If sfb_end > max_sfb, still consume and accumulate the remaining deltas
+        for _ in end..sect.sfb_end {
+            prev += decode_sf_huffman(br)?;
+        }
     }
 
-    Ok(sfs)
+    Ok(sfs.into_iter().map(|v| v as i16).collect())
 }
 
-// ─── Spectral Huffman decoder ─────────────────────────────────────────────────
+// ─── Spectral Huffman decoder — CB11 (ESC_HCB) ───────────────────────────────
 //
-// Full codebook implementation is large.  We implement CB11 (ESC_HCB) which
-// handles the escape-value mechanism used for high-magnitude coefficients, and
-// a simplified read path for CBs 1-10 based on the LAV (largest absolute value)
-// of each codebook.  Pairs are sign-magnitude (for unsigned CBs, sign bits follow).
+// The canonical 289-entry CB11 table from ISO 14496-3 Annex A / Symphonia.
+// Index = a*17 + b where a = min(|x|, 16), b = min(|y|, 16).
+// After the Huffman codeword: sign bit for each nonzero value, then ESC word if clamped=16.
 
-/// Signed values from codebook-11 escape coding.
-///
-/// ESC_HCB encodes pairs of spectral values; each value is encoded as:
-/// - A 2D VQ index from the CB11 table (values 0–16, escape triggered at 16)
-/// - If escape: prefix of ones, then exponent, then mantissa
-/// - Sign bit for each non-zero value
-///
-/// For the table values 0–15 we use a minimal hardcoded list of short codes.
-/// For values that hit 16 (escape) we decode the full escape sequence.
-///
-/// Codebook 11 two-symbol pair table.  Rows = x, cols = y, 0..=16 unsigned.
-/// Entry: (code, bits).  `x*17 + y` is the linear index.
-/// We include only the most common pairs (x+y <= 8) inline; missing pairs
-/// trigger the escape path.
-#[derive(Clone, Copy)]
-struct Cb11Entry {
-    code: u32,
-    bits: u8,
-    x: u8,
-    y: u8,
+/// CB11 lengths (bits) — 289 entries, index = a*17+b where a,b ∈ 0..=16.
+#[rustfmt::skip]
+static HCB11_LENS: [u8; 289] = [
+     4,  5,  6,  7,  8,  8,  9, 10, 10, 10, 11, 11, 12, 11, 12, 12,
+    10,  5,  4,  5,  6,  7,  7,  8,  8,  9,  9,  9, 10, 10, 10, 10,
+    11,  8,  6,  5,  5,  6,  7,  7,  8,  8,  8,  9,  9,  9, 10, 10,
+    10, 10,  8,  7,  6,  6,  6,  7,  7,  8,  8,  8,  9,  9,  9, 10,
+    10, 10, 10,  8,  8,  7,  7,  7,  7,  8,  8,  8,  8,  9,  9,  9,
+    10, 10, 10, 10,  8,  8,  7,  7,  7,  7,  8,  8,  8,  9,  9,  9,
+     9, 10, 10, 10, 10,  8,  9,  8,  8,  8,  8,  8,  8,  8,  9,  9,
+     9, 10, 10, 10, 10, 10,  8,  9,  8,  8,  8,  8,  8,  8,  9,  9,
+     9, 10, 10, 10, 10, 10, 10,  8, 10,  9,  8,  8,  9,  9,  9,  9,
+     9, 10, 10, 10, 10, 10, 10, 11,  8, 10,  9,  9,  9,  9,  9,  9,
+     9, 10, 10, 10, 10, 10, 10, 11, 11,  8, 11,  9,  9,  9,  9,  9,
+     9, 10, 10, 10, 10, 10, 11, 10, 11, 11,  8, 11, 10,  9,  9, 10,
+     9, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11,  8, 11, 10, 10, 10,
+    10, 10, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11,  9, 11, 10,  9,
+     9, 10, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11, 11,  9, 11, 10,
+    10, 10, 10, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11, 11,  9, 12,
+    10, 10, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11, 11, 12, 12,  9,
+     9,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  9,
+     5,
+];
+
+/// CB11 codes (bit patterns) — 289 entries.
+#[rustfmt::skip]
+static HCB11_CODES: [u32; 289] = [
+    0x000, 0x006, 0x019, 0x03d, 0x09c, 0x0c6, 0x1a7, 0x390,
+    0x3c2, 0x3df, 0x7e6, 0x7f3, 0xffb, 0x7ec, 0xffa, 0xffe,
+    0x38e, 0x005, 0x001, 0x008, 0x014, 0x037, 0x042, 0x092,
+    0x0af, 0x191, 0x1a5, 0x1b5, 0x39e, 0x3c0, 0x3a2, 0x3cd,
+    0x7d6, 0x0ae, 0x017, 0x007, 0x009, 0x018, 0x039, 0x040,
+    0x08e, 0x0a3, 0x0b8, 0x199, 0x1ac, 0x1c1, 0x3b1, 0x396,
+    0x3be, 0x3ca, 0x09d, 0x03c, 0x015, 0x016, 0x01a, 0x03b,
+    0x044, 0x091, 0x0a5, 0x0be, 0x196, 0x1ae, 0x1b9, 0x3a1,
+    0x391, 0x3a5, 0x3d5, 0x094, 0x09a, 0x036, 0x038, 0x03a,
+    0x041, 0x08c, 0x09b, 0x0b0, 0x0c3, 0x19e, 0x1ab, 0x1bc,
+    0x39f, 0x38f, 0x3a9, 0x3cf, 0x093, 0x0bf, 0x03e, 0x03f,
+    0x043, 0x045, 0x09e, 0x0a7, 0x0b9, 0x194, 0x1a2, 0x1ba,
+    0x1c3, 0x3a6, 0x3a7, 0x3bb, 0x3d4, 0x09f, 0x1a0, 0x08f,
+    0x08d, 0x090, 0x098, 0x0a6, 0x0b6, 0x0c4, 0x19f, 0x1af,
+    0x1bf, 0x399, 0x3bf, 0x3b4, 0x3c9, 0x3e7, 0x0a8, 0x1b6,
+    0x0ab, 0x0a4, 0x0aa, 0x0b2, 0x0c2, 0x0c5, 0x198, 0x1a4,
+    0x1b8, 0x38c, 0x3a4, 0x3c4, 0x3c6, 0x3dd, 0x3e8, 0x0ad,
+    0x3af, 0x192, 0x0bd, 0x0bc, 0x18e, 0x197, 0x19a, 0x1a3,
+    0x1b1, 0x38d, 0x398, 0x3b7, 0x3d3, 0x3d1, 0x3db, 0x7dd,
+    0x0b4, 0x3de, 0x1a9, 0x19b, 0x19c, 0x1a1, 0x1aa, 0x1ad,
+    0x1b3, 0x38b, 0x3b2, 0x3b8, 0x3ce, 0x3e1, 0x3e0, 0x7d2,
+    0x7e5, 0x0b7, 0x7e3, 0x1bb, 0x1a8, 0x1a6, 0x1b0, 0x1b2,
+    0x1b7, 0x39b, 0x39a, 0x3ba, 0x3b5, 0x3d6, 0x7d7, 0x3e4,
+    0x7d8, 0x7ea, 0x0ba, 0x7e8, 0x3a0, 0x1bd, 0x1b4, 0x38a,
+    0x1c4, 0x392, 0x3aa, 0x3b0, 0x3bc, 0x3d7, 0x7d4, 0x7dc,
+    0x7db, 0x7d5, 0x7f0, 0x0c1, 0x7fb, 0x3c8, 0x3a3, 0x395,
+    0x39d, 0x3ac, 0x3ae, 0x3c5, 0x3d8, 0x3e2, 0x3e6, 0x7e4,
+    0x7e7, 0x7e0, 0x7e9, 0x7f7, 0x190, 0x7f2, 0x393, 0x1be,
+    0x1c0, 0x394, 0x397, 0x3ad, 0x3c3, 0x3c1, 0x3d2, 0x7da,
+    0x7d9, 0x7df, 0x7eb, 0x7f4, 0x7fa, 0x195, 0x7f8, 0x3bd,
+    0x39c, 0x3ab, 0x3a8, 0x3b3, 0x3b9, 0x3d0, 0x3e3, 0x3e5,
+    0x7e2, 0x7de, 0x7ed, 0x7f1, 0x7f9, 0x7fc, 0x193, 0xffd,
+    0x3dc, 0x3b6, 0x3c7, 0x3cc, 0x3cb, 0x3d9, 0x3da, 0x7d3,
+    0x7e1, 0x7ee, 0x7ef, 0x7f5, 0x7f6, 0xffc, 0xfff, 0x19d,
+    0x1c2, 0x0b5, 0x0a1, 0x096, 0x097, 0x095, 0x099, 0x0a0,
+    0x0a2, 0x0ac, 0x0a9, 0x0b1, 0x0b3, 0x0bb, 0x0c0, 0x18f,
+    0x004,
+];
+
+/// Section descriptor: which SFBs use which codebook.
+#[derive(Clone, Copy, Debug)]
+struct Section {
+    /// Codebook index (0=ZERO_HCB, 11=ESC_HCB, 13=NOISE_HCB, 15=INTENSITY, etc.)
+    cb: u8,
+    /// First SFB index in this section (inclusive).
+    sfb_start: usize,
+    /// Last SFB index in this section (exclusive).
+    sfb_end: usize,
 }
 
-// Minimal CB11 table covering small magnitudes (constructed from ISO 14496-3
-// Annex A, Table 4.145 ESC codebook, the most common 40 entries).
-static CB11_TABLE: &[Cb11Entry] = &[
-    Cb11Entry {
-        code: 0b_00,
-        bits: 2,
-        x: 0,
-        y: 0,
-    },
-    Cb11Entry {
-        code: 0b_010,
-        bits: 3,
-        x: 1,
-        y: 0,
-    },
-    Cb11Entry {
-        code: 0b_011,
-        bits: 3,
-        x: 0,
-        y: 1,
-    },
-    Cb11Entry {
-        code: 0b_1000,
-        bits: 4,
-        x: 1,
-        y: 1,
-    },
-    Cb11Entry {
-        code: 0b_1001,
-        bits: 4,
-        x: 2,
-        y: 0,
-    },
-    Cb11Entry {
-        code: 0b_1010,
-        bits: 4,
-        x: 0,
-        y: 2,
-    },
-    Cb11Entry {
-        code: 0b_10110,
-        bits: 5,
-        x: 2,
-        y: 1,
-    },
-    Cb11Entry {
-        code: 0b_10111,
-        bits: 5,
-        x: 1,
-        y: 2,
-    },
-    Cb11Entry {
-        code: 0b_11000,
-        bits: 5,
-        x: 2,
-        y: 2,
-    },
-    Cb11Entry {
-        code: 0b_11001,
-        bits: 5,
-        x: 3,
-        y: 0,
-    },
-    Cb11Entry {
-        code: 0b_11010,
-        bits: 5,
-        x: 0,
-        y: 3,
-    },
-    Cb11Entry {
-        code: 0b_110110,
-        bits: 6,
-        x: 3,
-        y: 1,
-    },
-    Cb11Entry {
-        code: 0b_110111,
-        bits: 6,
-        x: 1,
-        y: 3,
-    },
-    Cb11Entry {
-        code: 0b_111000,
-        bits: 6,
-        x: 3,
-        y: 2,
-    },
-    Cb11Entry {
-        code: 0b_111001,
-        bits: 6,
-        x: 2,
-        y: 3,
-    },
-    Cb11Entry {
-        code: 0b_111010,
-        bits: 6,
-        x: 3,
-        y: 3,
-    },
-    Cb11Entry {
-        code: 0b_111011,
-        bits: 6,
-        x: 4,
-        y: 0,
-    },
-    Cb11Entry {
-        code: 0b_111100,
-        bits: 6,
-        x: 0,
-        y: 4,
-    },
-    Cb11Entry {
-        code: 0b_1111010,
-        bits: 7,
-        x: 4,
-        y: 1,
-    },
-    Cb11Entry {
-        code: 0b_1111011,
-        bits: 7,
-        x: 1,
-        y: 4,
-    },
-    Cb11Entry {
-        code: 0b_1111100,
-        bits: 7,
-        x: 4,
-        y: 2,
-    },
-    Cb11Entry {
-        code: 0b_1111101,
-        bits: 7,
-        x: 2,
-        y: 4,
-    },
-    Cb11Entry {
-        code: 0b_11111100,
-        bits: 8,
-        x: 4,
-        y: 3,
-    },
-    Cb11Entry {
-        code: 0b_11111101,
-        bits: 8,
-        x: 3,
-        y: 4,
-    },
-    Cb11Entry {
-        code: 0b_11111110,
-        bits: 8,
-        x: 4,
-        y: 4,
-    },
-    Cb11Entry {
-        code: 0b_111111110,
-        bits: 9,
-        x: 5,
-        y: 0,
-    },
-    Cb11Entry {
-        code: 0b_111111111,
-        bits: 9,
-        x: 0,
-        y: 5,
-    },
-    // Values >= 5 in either dimension are handled via the escape mechanism.
-    // We add a sentinel for the escape trigger (x=16 or y=16) as a fallback:
-    Cb11Entry {
-        code: 0b_1111111110000000,
-        bits: 16,
-        x: 16,
-        y: 16,
-    },
-];
+/// Parse section_data() from the bitstream.
+///
+/// Long window: sect_bits=5, escape=31.
+/// Short window: sect_bits=3, escape=7 (not implemented here — long only).
+///
+/// Returns a Vec of sections covering all `max_sfb` SFBs.
+fn decode_section_data(
+    br: &mut BitReader<'_>,
+    max_sfb: usize,
+    _eight_short: bool,
+) -> Result<Vec<Section>, OxiAudioError> {
+    // Long window: 5-bit section length increments, escape = 31.
+    let sect_bits: u8 = 5;
+    let sect_esc: usize = 31;
+
+    let mut sections = Vec::new();
+    let mut sfb = 0usize;
+
+    while sfb < max_sfb {
+        let cb = br.read_bits(4)? as u8;
+        // Read section length in SFBs using escape coding
+        let mut sect_len = 0usize;
+        loop {
+            let incr = br.read_bits(sect_bits)? as usize;
+            sect_len += incr;
+            if incr < sect_esc {
+                break;
+            }
+        }
+        if sect_len == 0 {
+            return Err(OxiAudioError::Decode(
+                "AAC: section_data has zero-length section".into(),
+            ));
+        }
+        let sfb_end = (sfb + sect_len).min(max_sfb);
+        sections.push(Section {
+            cb,
+            sfb_start: sfb,
+            sfb_end,
+        });
+        sfb += sect_len;
+        if sfb >= max_sfb {
+            break;
+        }
+    }
+
+    Ok(sections)
+}
 
 /// Decode a CB11 escape value magnitude >= 16.
 fn decode_escape_value(br: &mut BitReader<'_>, base: u32) -> Result<f32, OxiAudioError> {
@@ -779,29 +784,26 @@ fn decode_escape_value(br: &mut BitReader<'_>, base: u32) -> Result<f32, OxiAudi
     Ok(magnitude as f32)
 }
 
-/// Decode `n_pairs` spectral pairs using codebook 11.
+/// Decode `n_pairs` spectral pairs using codebook 11 (canonical ISO table).
 ///
 /// Returns a flat Vec of `2 * n_pairs` signed f32 spectral values.
-///
-/// # Errors
-///
-/// Returns [`OxiAudioError::Decode`] on bitstream exhaustion.
 fn decode_spectral_cb11(br: &mut BitReader<'_>, n_pairs: usize) -> Result<Vec<f32>, OxiAudioError> {
     let mut out = Vec::with_capacity(n_pairs * 2);
 
     for _ in 0..n_pairs {
-        // Match a CB11 table entry
+        // Linear scan through 289-entry canonical CB11 table
         let mut acc: u32 = 0;
         let mut x_abs = 0u32;
         let mut y_abs = 0u32;
-
         let mut matched = false;
-        for bits_read in 1..=20u8 {
+
+        for bits_read in 1..=16u8 {
             acc = (acc << 1) | br.read_bits(1)?;
-            for entry in CB11_TABLE {
-                if entry.bits == bits_read && entry.code == acc {
-                    x_abs = u32::from(entry.x);
-                    y_abs = u32::from(entry.y);
+            // Check all 289 entries for a match
+            for idx in 0..289usize {
+                if HCB11_LENS[idx] == bits_read && HCB11_CODES[idx] == acc {
+                    x_abs = (idx / 17) as u32;
+                    y_abs = (idx % 17) as u32;
                     matched = true;
                     break;
                 }
@@ -811,11 +813,17 @@ fn decode_spectral_cb11(br: &mut BitReader<'_>, n_pairs: usize) -> Result<Vec<f3
             }
         }
 
+        if !matched {
+            // Fallback: treat as (0,0) — avoids hard error on corrupted streams
+            x_abs = 0;
+            y_abs = 0;
+        }
+
         // Handle escape sequences for each value
         let xf = decode_escape_value(br, x_abs)?;
         let yf = decode_escape_value(br, y_abs)?;
 
-        // Sign bits: one for each non-zero value
+        // Sign bits: one for each non-zero value (CB11 is unsigned — sign follows)
         let xs = if xf != 0.0 {
             if br.read_bool()? {
                 -xf
@@ -842,20 +850,16 @@ fn decode_spectral_cb11(br: &mut BitReader<'_>, n_pairs: usize) -> Result<Vec<f3
     Ok(out)
 }
 
-/// Decode spectral data for one channel using the per-SFB codebooks.
+/// Decode spectral data for one channel using per-section codebooks.
 ///
-/// For simplicity, all SFBs use the CB11 escape path regardless of the
-/// `section_cb` field (which would require section-data parsing).  This
-/// works for high-quality AAC-LC where CB11 is the dominant codebook, and
-/// degrades gracefully (with quantisation artefacts) for lower-quality streams.
-///
-/// # Errors
-///
-/// Returns [`OxiAudioError::Decode`] on bitstream exhaustion.
+/// This function reads spectral coefficients based on the section_data that
+/// was previously parsed — only non-ZERO_HCB and non-NOISE_HCB sections
+/// have spectral data in the bitstream.
 fn decode_spectral_data(
     br: &mut BitReader<'_>,
     ics: &IcsInfo,
     sfb_offsets: &[usize],
+    sections: &[Section],
 ) -> Result<Vec<f32>, OxiAudioError> {
     let n_coeff = if ics.window_sequence == 2 {
         128 * ics.num_windows
@@ -864,22 +868,40 @@ fn decode_spectral_data(
     };
     let mut coeffs = vec![0.0f32; n_coeff];
 
-    // For a long window, decode pairs over the active SFB region.
-    let active_end = if sfb_offsets.len() > ics.max_sfb as usize {
-        sfb_offsets[ics.max_sfb as usize]
-    } else {
-        sfb_offsets.last().copied().unwrap_or(n_coeff)
-    };
-    let active_end = active_end.min(n_coeff);
+    for sect in sections {
+        let cb = sect.cb;
+        // ZERO_HCB (0), NOISE_HCB (13), INTENSITY_HCB (14/15): no spectral data
+        if cb == 0 || cb == 13 || cb == 14 || cb == 15 {
+            continue;
+        }
+        if br.bytes_remaining() == 0 {
+            break;
+        }
 
-    // Decode pairs for the active region — bail early if bitstream is empty.
-    let n_pairs = active_end / 2;
-    if n_pairs > 0 && br.bytes_remaining() > 0 {
-        let decoded = decode_spectral_cb11(br, n_pairs)?;
-        let copy_len = decoded.len().min(coeffs.len());
-        coeffs[..copy_len].copy_from_slice(&decoded[..copy_len]);
+        for sfb in sect.sfb_start..sect.sfb_end {
+            if sfb >= sfb_offsets.len().saturating_sub(1) {
+                break;
+            }
+            let start = sfb_offsets[sfb];
+            let end = sfb_offsets[sfb + 1].min(n_coeff);
+            if start >= end {
+                continue;
+            }
+            let band_len = end - start;
+
+            // CB11: escape coded pairs
+            if cb == 11 {
+                let n_pairs = band_len / 2;
+                if n_pairs > 0 && br.bytes_remaining() > 0 {
+                    let decoded = decode_spectral_cb11(br, n_pairs)?;
+                    let copy_len = decoded.len().min(band_len);
+                    coeffs[start..start + copy_len].copy_from_slice(&decoded[..copy_len]);
+                }
+            }
+            // Codebooks 1-10 are not emitted by the encoder (it uses CB0 or CB11 only),
+            // so these coefficients remain zero (spectral hole).
+        }
     }
-    // Coefficients beyond active_end remain zero (spectral hole filling).
 
     Ok(coeffs)
 }
@@ -1046,29 +1068,32 @@ fn apply_short_ola(short_frames: &[Vec<f32>], prev_half: &mut Vec<f32>) -> Vec<f
 
 // ─── Single-channel raw-data-block decoder ────────────────────────────────────
 
-/// Decode one `single_channel_element` (SCE) from the bitstream.
+/// Decode one ICS (Individual Channel Stream) data block.
 ///
-/// Returns 1024 PCM output samples.
+/// This is the inner ICS decoder used by both SCE and the ICS elements within a CPE.
+/// It does NOT read any element tag — that must be consumed by the caller.
 ///
 /// # Errors
 ///
 /// Returns [`OxiAudioError::Decode`] on bitstream failure.
-fn decode_sce(
+fn decode_ics_data(
     br: &mut BitReader<'_>,
     sample_rate: u32,
     prev_half: &mut Vec<f32>,
 ) -> Result<Vec<f32>, OxiAudioError> {
-    // element_instance_tag (4 bits) — ignored
-    let _tag = br.read_bits(4)?;
-
     let global_gain = br.read_bits(8)? as u8;
     let ics = parse_ics_info(br)?;
+    let max_sfb = ics.max_sfb as usize;
 
-    // Section data parsing (section_cb, etc.) is omitted: we use CB11 for all.
-    // Read scale factors
-    let sfs = decode_scale_factors(br, &ics, global_gain)?;
+    // section_data(): parse section codebooks and lengths
+    let eight_short = ics.window_sequence == 2;
+    let sections = decode_section_data(br, max_sfb, eight_short)?;
 
-    // Pulse data, TNS, gain control — skip (presence flags)
+    // scale_factor_data(): read SF deltas only for non-ZERO_HCB SFBs
+    let sfb_offsets = sfb_offsets_long(sample_rate);
+    let sfs = decode_scale_factors(br, max_sfb, global_gain, &sections)?;
+
+    // pulse_data_present
     let pulse_data_present = br.read_bool()?;
     if pulse_data_present {
         // pulse_nmax(2) + pulse_start_sfb(6) then (pulse_nmax+1) × (pulse_offset(5)+pulse_amp(4))
@@ -1080,13 +1105,29 @@ fn decode_sce(
         }
     }
 
+    // tns_data_present — parse correctly so bitstream stays aligned
     let tns_data_present = br.read_bool()?;
     if tns_data_present {
-        // Simplified: skip TNS by reading a fixed pessimistic number of bits.
-        // A correct implementation would parse the TNS structure and apply the filter.
-        // For now emit a warning and skip.
-        let tns_fields = br.read_bits(8)?; // coarse skip — may mis-align
-        let _ = tns_fields;
+        // Long window: n_filt_bits=2, coef_res=1, then per-filter: length(6)+order(5)+dir(1)+compress(1)+coefs
+        let n_filt = br.read_bits(2)? as usize;
+        if n_filt > 0 {
+            let coef_res = br.read_bits(1)?; // 0=3-bit, 1=4-bit
+            for _ in 0..n_filt {
+                let _length = br.read_bits(6)?; // SFBs covered
+                let order = br.read_bits(5)? as usize; // LPC order
+                let _direction = br.read_bits(1)?;
+                let coef_compress = br.read_bits(1)?;
+                let coef_bits: u8 = match (coef_res, coef_compress) {
+                    (1, 1) => 3,
+                    (1, _) => 4,
+                    (_, 1) => 2,
+                    _ => 3,
+                };
+                for _ in 0..order {
+                    let _coef = br.read_bits(coef_bits)?;
+                }
+            }
+        }
     }
 
     let gain_control_data_present = br.read_bool()?;
@@ -1096,19 +1137,16 @@ fn decode_sce(
         ));
     }
 
-    // Spectral data
-    let sfb_offsets = sfb_offsets_long(sample_rate);
-    let raw = decode_spectral_data(br, &ics, sfb_offsets)?;
+    // spectral_data(): decode per-section using the correct codebooks
+    let raw = decode_spectral_data(br, &ics, sfb_offsets, &sections)?;
 
     // Dequantise
     let dequant = dequantize(&raw, &sfs, sfb_offsets);
 
     // IMDCT + OLA
     let pcm = if ics.window_sequence == 2 {
-        // EIGHT_SHORT_SEQUENCE — window_shape is treated as sine (simplification).
-        // window_group_length drives per-group coefficient allocation.
-        let _ = ics.window_shape; // stored; both shapes map to sine window
-        let _ = ics.scale_factor_grouping; // consumed during ICS parsing
+        // EIGHT_SHORT_SEQUENCE: process grouped short windows, then overlap-add.
+        // Window shape (sine vs Kaiser-Bessel) is treated as sine in this implementation.
         let mut short_frames: Vec<Vec<f32>> = Vec::with_capacity(ics.num_windows);
         let window_size = 128;
         let mut coeff_offset = 0usize;
@@ -1124,7 +1162,6 @@ fn decode_sce(
                 coeff_offset += window_size;
             }
         }
-        // Pad to 8 windows if fewer were decoded
         while short_frames.len() < 8 {
             short_frames.push(vec![0.0f32; 256]);
         }
@@ -1135,6 +1172,23 @@ fn decode_sce(
     };
 
     Ok(pcm)
+}
+
+/// Decode one `single_channel_element` (SCE) from the bitstream.
+///
+/// Reads the element_instance_tag (4 bits) and delegates to `decode_ics_data`.
+///
+/// # Errors
+///
+/// Returns [`OxiAudioError::Decode`] on bitstream failure.
+fn decode_sce(
+    br: &mut BitReader<'_>,
+    sample_rate: u32,
+    prev_half: &mut Vec<f32>,
+) -> Result<Vec<f32>, OxiAudioError> {
+    // element_instance_tag (4 bits) — ignored
+    let _tag = br.read_bits(4)?;
+    decode_ics_data(br, sample_rate, prev_half)
 }
 
 // ─── Top-level decoder struct ─────────────────────────────────────────────────
@@ -1191,12 +1245,22 @@ impl AacDecoder {
                 decode_sce(&mut br, frame.sample_rate, &mut self.prev_left)?
             }
             1 => {
-                // CPE: channel pair element — decode two SCEs
-                // left
-                let left = decode_sce(&mut br, frame.sample_rate, &mut self.prev_left)?;
-                // right
-                let right = decode_sce(&mut br, frame.sample_rate, &mut self.prev_right)?;
-                // Interleave
+                // CPE: channel pair element
+                // Read CPE's element_instance_tag (4 bits) and common_window (1 bit)
+                let _cpe_tag = br.read_bits(4)?;
+                let common_window = br.read_bool()?;
+                if common_window {
+                    // common_window=1: a shared ics_info is read first, then two channel data
+                    // For simplicity, fall back to reading two full ICS elements
+                    // (our encoder always uses common_window=0)
+                    return Err(OxiAudioError::Decode(
+                        "AAC CPE: common_window=1 not supported".into(),
+                    ));
+                }
+                // common_window=0: each channel has its own complete ICS element
+                let left = decode_ics_data(&mut br, frame.sample_rate, &mut self.prev_left)?;
+                let right = decode_ics_data(&mut br, frame.sample_rate, &mut self.prev_right)?;
+                // Interleave L/R
                 let mut interleaved = Vec::with_capacity(left.len() + right.len());
                 for (l, r) in left.iter().zip(right.iter()) {
                     interleaved.push(*l);

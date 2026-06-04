@@ -5,7 +5,81 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
-<!-- No changes pending. All M0–M23 milestones shipped in 0.1.0. -->
+## [0.1.1] - 2026-06-04
+
+### Added
+- **`opus_pvq` module** (`oxiaudio-encode`): CWRS (Combinatorial Number System / CWRS)
+  PVQ encoder — bit-exact inverse of `decode_pulses` from `opus-decoder`.
+  Public functions: `encode_pulses(enc, y)`, `ncwrs_urow`, `icwrs`, plus u64-wide
+  fallback variants (`ncwrs_urow_u64`, `icwrs_u64`, `enc_uint_u64`) for large
+  bands where V(N,K) exceeds u32::MAX (e.g. CELT band 20 at high bitrates).
+- **`OpusDecoder::final_range()`** (`oxiaudio-decode`): exposes the range coder's
+  final range value for RFC 6716 conformance testing against the encoder's
+  `final_range()`.
+- **AAC decoder `decode_ics_data`** (`oxiaudio-decode`): inner ICS decoder
+  extracted from `decode_sce`, now shared by both SCE and CPE element decoders.
+- **AAC decoder `Section` / `decode_section_data`** (`oxiaudio-decode`): proper
+  `section_data()` bitfield parser — reads 4-bit codebook + escape-coded section
+  lengths; used by scale-factor and spectral-data decoders.
+- **AAC decoder SFB offset tables** (`oxiaudio-decode`): canonical ISO 14496-3
+  Table 4.138 tables added for 24 kHz/22.05 kHz, 16 kHz, 64 kHz, 96 kHz/88.2 kHz,
+  and 8 kHz; `sfb_offsets_long` now uses a threshold-based lookup matching the
+  encoder exactly.
+- **AAC decoder CB11 canonical table** (`oxiaudio-decode`): the minimal 28-entry
+  CB11 stub replaced by the full 289-entry `HCB11_LENS`/`HCB11_CODES` arrays from
+  ISO 14496-3 Annex A, enabling correct high-energy spectral coefficient decoding.
+- **Test suites**: `m_aac_roundtrip.rs` (249 lines), `m_oxisound_pipeline.rs`
+  (478 lines), `m_vorbis_roundtrip.rs` (321 lines), `m_stream_pitch.rs` (230 lines)
+  added to `oxiaudio-encode` and `oxiaudio` crates.
+- `oxiaudio-dsp` added as dev-dependency in `oxiaudio-encode` for cross-crate
+  pipeline integration tests.
+
+### Changed
+- **`RangeEncoder` rewritten** (`oxiaudio-encode`): `opus_range.rs` is now a
+  faithful RFC 6716 §4.1 port of libopus `ec_enc`, bit-exact with the
+  `EcDec` decoder in `opus-decoder`; the previous self-consistent-but-non-standard
+  encoding is replaced.  Raw bits are packed from the physical end of the buffer
+  (LSB-first) and stitched with range bytes on `finish()`.
+- **`opus_celt` PVQ shape encoding** (`oxiaudio-encode`): `encode_pvq_shape`
+  replaced by `opus_pvq::encode_pulses` — CWRS combinatorial coding instead of
+  magnitude+sign per-coefficient encoding.
+- `compute_global_gain` (`oxiaudio-encode`): demoted from `pub` to
+  `#[cfg(test)]`-private; only used in unit tests.
+- `oxiaudio-encode` restored as dev-dependency in `oxiaudio-decode` (was
+  temporarily removed for publish; circular dev-dep now resolved).
+
+### Fixed
+- **AAC decoder SFB tables** (`oxiaudio-decode`): the 48 kHz and 32 kHz SFB
+  boundary arrays were wrong (only 33 entries, not matching the encoder).  They
+  now carry the full canonical ISO 14496-3 entries (50 and 52 boundaries
+  respectively), eliminating spectral misalignment on common sample rates.
+- **AAC decoder scale-factor parsing** (`oxiaudio-decode`): `decode_scale_factors`
+  was unconditionally reading one delta per SFB; it now skips `ZERO_HCB` sections
+  (no bits in bitstream) and correctly accumulates deltas only over live sections,
+  preventing bitstream misalignment.
+- **AAC decoder spectral data** (`oxiaudio-decode`): `decode_spectral_data` was
+  decoding all SFBs with CB11 regardless of the codebook; it now reads only
+  sections that have spectral data in the bitstream (`cb != 0, 13, 14, 15`),
+  eliminating systematic decode errors for streams with zero-coded bands.
+- **AAC decoder TNS parsing** (`oxiaudio-decode`): `tns_data_present` block was
+  a coarse 8-bit skip that mis-aligned the bitstream; it now parses
+  `n_filt`, `coef_res`, per-filter `length`/`order`/`direction`/`coef_compress`,
+  and reads exactly the right number of coefficient bits.
+- **AAC decoder CPE element** (`oxiaudio-decode`): channel-pair elements now
+  correctly read the 4-bit `element_instance_tag` and 1-bit `common_window` flag
+  before decoding each channel's ICS data; previously these bits were silently
+  consumed as audio data.
+- **AAC decoder `IcsInfo`** (`oxiaudio-decode`): unused fields `window_shape` and
+  `scale_factor_grouping` removed; the `predictor_data_present` bit (always present
+  per ISO 14496-3) is now correctly parsed and discarded.
+- **AAC encoder `scale_factor_grouping`** (`oxiaudio-encode`): the 7-bit
+  `scale_factor_grouping` field is only written for `EIGHT_SHORT_SEQUENCE`; it
+  was incorrectly written for `ONLY_LONG_SEQUENCE` frames, producing a 7-bit
+  bitstream offset that caused decoder misalignment on all long-window frames.
+- **AAC encoder `compute_global_gain_and_inv_scale`** (`oxiaudio-encode`): gain
+  formula corrected to ISO standard (`gain = 100 − (16/3)·log2(target/peak_q)`,
+  `inv_scale = 2^(−3·(gain−100)/16)`); the previous formula included an erroneous
+  `+16.0` offset and a redundant reciprocal, causing systematic over-quantization.
 
 ## [0.1.0] - 2026-06-01 (M0–M23 combined release, 1079 tests)
 
@@ -179,3 +253,5 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - `AudioClock::drift_ppm`, `elapsed_secs`, `elapsed_frames`
 - `AudioPipeline` parallel branch nodes with per-node bypass/mute and latency reporting
 - Optional `serde` feature: JSON-serializable core types (AudioBuffer, AudioFormat, AudioMetadata, ChannelLayout, SampleFormat)
+
+[0.1.1]: https://github.com/cool-japan/oxiaudio/releases/tag/v0.1.1

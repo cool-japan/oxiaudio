@@ -29,8 +29,7 @@ opus-decoder   = { workspace = true, optional = true }
 [dev-dependencies]
 hound           = { workspace = true }
 criterion       = { workspace = true }
-# temporarily removed for publish (circular/forward dev-dep); restore after publish complete
-# oxiaudio-encode = { workspace = true }
+oxiaudio-encode = { workspace = true }
 
 [[bench]]
 name = "decode_bench"

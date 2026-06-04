@@ -20,8 +20,8 @@ mp3lame-encoder = { workspace = true, optional = true, features = ["std"] }
 [dev-dependencies]
 criterion = { workspace = true }
 hound = { workspace = true }
-oxiaudio-decode = { workspace = true }
-oxiaudio-dsp = { workspace = true }
+oxiaudio-decode = { path = "../oxiaudio-decode" }
+oxiaudio-dsp = { path = "../oxiaudio-dsp" }
 
 [[bench]]
 name = "mp3_bench"

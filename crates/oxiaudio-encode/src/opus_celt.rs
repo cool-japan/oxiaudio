@@ -25,6 +25,7 @@
 //! ```
 
 use crate::opus_mdct::mdct_forward;
+use crate::opus_pvq;
 use crate::opus_range::RangeEncoder;
 
 /// Number of CELT frequency bands (RFC 6716, Table 1).
@@ -130,26 +131,6 @@ pub(crate) fn compute_k_pulses(band_size: usize, bits_available: u32) -> u32 {
     }
     let log2_n = (band_size as f32 + 1.0).log2().max(1.0);
     (bits_available as f32 / log2_n).floor() as u32
-}
-
-/// Encode a PVQ band shape vector into the range encoder.
-///
-/// Each non-zero coefficient contributes its unsigned magnitude (in [0, K])
-/// followed by a sign bit (0 = positive, 1 = negative).  Coefficients
-/// where `|y[k]| == 0` do not emit a sign bit.
-fn encode_pvq_shape(enc: &mut RangeEncoder, y: &[i32], k_pulses: u32) {
-    if k_pulses == 0 {
-        return;
-    }
-    let alphabet = k_pulses + 1; // magnitudes live in [0, k_pulses]
-    for &yi in y {
-        let mag = yi.unsigned_abs();
-        enc.encode_uint(mag, alphabet);
-        if mag > 0 {
-            let sign = u32::from(yi < 0);
-            enc.encode_uint(sign, 2);
-        }
-    }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -269,7 +250,7 @@ fn encode_celt_frame_inner(
         let k = compute_k_pulses(band_coeffs.len(), bits_per_band);
         if k > 0 {
             let y = pvq_encode(&normalized, k);
-            encode_pvq_shape(enc, &y, k);
+            opus_pvq::encode_pulses(enc, &y);
         }
     }
 }

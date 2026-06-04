@@ -2,7 +2,7 @@
 //!
 //! Produces a valid Vorbis I bitstream (three header packets + audio packets)
 //! encapsulated in OGG pages.  Audio packets use MDCT forward-transform coefficients
-//! quantised through a simple Floor type-1 curve and Residue type-0 scalar VQ.
+//! quantised through a Floor type-1 curve and Residue type-0 scalar VQ.
 //!
 //! # Supported configurations
 //! - 1 or 2 channels
@@ -38,14 +38,12 @@ const VENDOR_STRING: &str = "OxiAudio 0.1.0 Vorbis encoder";
 /// Number of MDCT output coefficients (BLOCK_SIZE_1 / 2).
 const N_COEFFS: usize = BLOCK_SIZE_1 / 2; // 1024
 
-/// Residue encoding range [−MAX_RESIDUE, +MAX_RESIDUE].
-const MAX_RESIDUE: f32 = 6.0;
+/// Residue encoding range: min = -0.5, delta = 1/255.
+const RESIDUE_MIN: f32 = -0.5;
+const RESIDUE_DELTA: f32 = 1.0 / 255.0;
 
 /// Number of residue quantisation steps (VQ entries).
 const RESIDUE_ENTRIES: usize = 256;
-
-/// Residue quantisation delta: covers [−MAX_RESIDUE, +MAX_RESIDUE] in 256 steps.
-const RESIDUE_DELTA: f32 = (MAX_RESIDUE * 2.0) / (RESIDUE_ENTRIES as f32 - 1.0);
 
 /// Residue begin/end for active encoding (first 128 MDCT bins).
 const RESIDUE_BEGIN: usize = 0;
@@ -57,13 +55,95 @@ const PARTITION_SIZE: usize = 32;
 /// Number of partitions in the active residue range.
 const N_PARTITIONS: usize = (RESIDUE_END - RESIDUE_BEGIN) / PARTITION_SIZE; // 4
 
+/// Floor1 X-post positions (explicit; endpoints 0 and 1024 are implicit).
+/// 3 partitions × 2 dims each = 6 explicit posts.
+const FLOOR_X_POSTS: [u32; 6] = [32, 64, 128, 256, 512, 640];
+
+/// Number of floor1 explicit X posts.
+const N_FLOOR_POSTS: usize = FLOOR_X_POSTS.len(); // 6
+
+/// Full floor X list: [0] + FLOOR_X_POSTS + [1024] (but note: decoder adds 1<<rangebits automatically)
+/// The decoder inserts x=0 first and x=1<<rangebits=1024 second, then reads explicit posts.
+/// So full_x = [0, 1024, 32, 64, 128, 256, 512, 640]
+/// Total floor Y values = 2 + 6 = 8.
+const N_FLOOR_Y: usize = 2 + N_FLOOR_POSTS; // 8
+
+// ─── FLOOR1_INVERSE_DB_TABLE ──────────────────────────────────────────────────
+
+/// Vorbis I floor1 inverse dB table (spec §10.1).
+#[allow(clippy::unreadable_literal)]
+#[allow(clippy::excessive_precision)]
+#[rustfmt::skip]
+const FLOOR1_INVERSE_DB_TABLE: [f32; 256] = [
+    1.0649863e-07, 1.1341951e-07, 1.2079015e-07, 1.2863978e-07,
+    1.3699951e-07, 1.4590251e-07, 1.5538408e-07, 1.6548181e-07,
+    1.7623575e-07, 1.8768855e-07, 1.9988561e-07, 2.1287530e-07,
+    2.2670913e-07, 2.4144197e-07, 2.5713223e-07, 2.7384213e-07,
+    2.9163793e-07, 3.1059021e-07, 3.3077411e-07, 3.5226968e-07,
+    3.7516214e-07, 3.9954229e-07, 4.2550680e-07, 4.5315863e-07,
+    4.8260743e-07, 5.1396998e-07, 5.4737065e-07, 5.8294187e-07,
+    6.2082472e-07, 6.6116941e-07, 7.0413592e-07, 7.4989464e-07,
+    7.9862701e-07, 8.5052630e-07, 9.0579828e-07, 9.6466216e-07,
+    1.0273513e-06, 1.0941144e-06, 1.1652161e-06, 1.2409384e-06,
+    1.3215816e-06, 1.4074654e-06, 1.4989305e-06, 1.5963394e-06,
+    1.7000785e-06, 1.8105592e-06, 1.9282195e-06, 2.0535261e-06,
+    2.1869758e-06, 2.3290978e-06, 2.4804557e-06, 2.6416497e-06,
+    2.8133190e-06, 2.9961443e-06, 3.1908506e-06, 3.3982101e-06,
+    3.6190449e-06, 3.8542308e-06, 4.1047004e-06, 4.3714470e-06,
+    4.6555282e-06, 4.9580707e-06, 5.2802740e-06, 5.6234160e-06,
+    5.9888572e-06, 6.3780469e-06, 6.7925283e-06, 7.2339451e-06,
+    7.7040476e-06, 8.2047000e-06, 8.7378876e-06, 9.3057248e-06,
+    9.9104632e-06, 1.0554501e-05, 1.1240392e-05, 1.1970856e-05,
+    1.2748789e-05, 1.3577278e-05, 1.4459606e-05, 1.5399272e-05,
+    1.6400004e-05, 1.7465768e-05, 1.8600792e-05, 1.9809576e-05,
+    2.1096914e-05, 2.2467911e-05, 2.3928002e-05, 2.5482978e-05,
+    2.7139006e-05, 2.8902651e-05, 3.0780908e-05, 3.2781225e-05,
+    3.4911534e-05, 3.7180282e-05, 3.9596466e-05, 4.2169667e-05,
+    4.4910090e-05, 4.7828601e-05, 5.0936773e-05, 5.4246931e-05,
+    5.7772202e-05, 6.1526565e-05, 6.5524908e-05, 6.9783085e-05,
+    7.4317983e-05, 7.9147585e-05, 8.4291040e-05, 8.9768747e-05,
+    9.5602426e-05, 0.00010181521, 0.00010843174, 0.00011547824,
+    0.00012298267, 0.00013097477, 0.00013948625, 0.00014855085,
+    0.00015820453, 0.00016848555, 0.00017943469, 0.00019109536,
+    0.00020351382, 0.00021673929, 0.00023082423, 0.00024582449,
+    0.00026179955, 0.00027881276, 0.00029693158, 0.00031622787,
+    0.00033677814, 0.00035866388, 0.00038197188, 0.00040679456,
+    0.00043323036, 0.00046138411, 0.00049136745, 0.00052329927,
+    0.00055730621, 0.00059352311, 0.00063209358, 0.00067317058,
+    0.00071691700, 0.00076350630, 0.00081312324, 0.00086596457,
+    0.00092223983, 0.00098217216, 0.0010459992,  0.0011139742,
+    0.0011863665,  0.0012634633,  0.0013455702,  0.0014330129,
+    0.0015261382,  0.0016253153,  0.0017309374,  0.0018434235,
+    0.0019632195,  0.0020908006,  0.0022266726,  0.0023713743,
+    0.0025254795,  0.0026895994,  0.0028643847,  0.0030505286,
+    0.0032487691,  0.0034598925,  0.0036847358,  0.0039241906,
+    0.0041792066,  0.0044507950,  0.0047400328,  0.0050480668,
+    0.0053761186,  0.0057254891,  0.0060975636,  0.0064938176,
+    0.0069158225,  0.0073652516,  0.0078438871,  0.0083536271,
+    0.0088964928,  0.009474637,   0.010090352,   0.010746080,
+    0.011444421,   0.012188144,   0.012980198,   0.013823725,
+    0.014722068,   0.015678791,   0.016697687,   0.017782797,
+    0.018938423,   0.020169149,   0.021479854,   0.022875735,
+    0.024362330,   0.025945531,   0.027631618,   0.029427276,
+    0.031339626,   0.033376252,   0.035545228,   0.037855157,
+    0.040315199,   0.042935108,   0.045725273,   0.048696758,
+    0.051861348,   0.055231591,   0.058820850,   0.062643361,
+    0.066714279,   0.071049749,   0.075666962,   0.080584227,
+    0.085821044,   0.091398179,   0.097337747,   0.10366330,
+    0.11039993,    0.11757434,    0.12521498,    0.13335215,
+    0.14201813,    0.15124727,    0.16107617,    0.17154380,
+    0.18269168,    0.19456402,    0.20720788,    0.22067342,
+    0.23501402,    0.25028656,    0.26655159,    0.28387361,
+    0.30232132,    0.32196786,    0.34289114,    0.36517414,
+    0.38890521,    0.41417847,    0.44109412,    0.46975890,
+    0.50028648,    0.53279791,    0.56742212,    0.60429640,
+    0.64356699,    0.68538959,    0.72993007,    0.77736504,
+    0.82788260,    0.88168307,    0.9389798,     1.0,
+];
+
 // ─── BitWriter ────────────────────────────────────────────────────────────────
 
 /// LSB-first (little-endian) bit-packer for Vorbis packet fields.
-///
-/// Vorbis packs all fields LSB-first into a flat byte stream. `BitWriter`
-/// accumulates bits in `current_byte`, flushing to `buf` whenever 8 bits have
-/// been collected.
 struct BitWriter {
     buf: Vec<u8>,
     /// Number of valid bits in `current_byte` (0..8).
@@ -119,38 +199,17 @@ impl BitWriter {
     }
 }
 
-// ─── ilog helper ─────────────────────────────────────────────────────────────
-
-/// Return `floor(log2(x)) + 1` (number of bits to represent x), or 0 if x == 0.
-///
-/// Used by the Vorbis spec for compact index encoding.
-#[allow(dead_code)]
-const fn ilog(x: u32) -> u32 {
-    if x == 0 {
-        0
-    } else {
-        32 - x.leading_zeros()
-    }
-}
-
 // ─── Vorbis float32 packing ───────────────────────────────────────────────────
 
 /// Encode a scalar `f32` into the Vorbis packed-float32 format (§9.2.5).
-///
-/// The packed format stores: `value = ±mantissa × 2^(exponent − 788)`.
-/// - Bits 30..20 (10 bits): biased exponent
-/// - Bits 20..0  (21 bits): mantissa
-/// - Bit  31     (1 bit):   sign
 fn pack_vorbis_float32(value: f32) -> u32 {
     if value == 0.0 {
         return 0;
     }
     let sign: u32 = if value < 0.0 { 1 } else { 0 };
     let abs_val = value.abs();
-    // raw_exp = floor(log2(abs_val)) + 1, biased by 788
     let raw_exp = abs_val.log2().floor() as i32 + 1 + 788;
     let raw_exp = raw_exp.clamp(0, 1023) as u32;
-    // mantissa = abs_val / 2^(raw_exp − 788 − 21), clamped to 21 bits
     let shift = (raw_exp as i32) - 788 - 21;
     let mantissa_f = if shift >= 0 {
         abs_val / (2.0f32).powi(shift)
@@ -161,26 +220,122 @@ fn pack_vorbis_float32(value: f32) -> u32 {
     (sign << 31) | (raw_exp << 21) | mantissa
 }
 
+// ─── Canonical codewords ──────────────────────────────────────────────────────
+
+/// Port of symphonia's `synthesize_codewords` algorithm.
+///
+/// Given a list of code lengths, assigns canonical Huffman codewords.
+/// For a uniform-length book (all lengths equal), codeword[i] == i.
+///
+/// Returns a `Vec<u32>` parallel to `lens` (including zero-length entries
+/// which get placeholder 0 — callers must not use these).
+fn canonical_codewords(lens: &[u8]) -> Vec<u32> {
+    let mut codewords = Vec::with_capacity(lens.len());
+    let mut next_codeword = [0u32; 33];
+
+    for &len in lens {
+        if len == 0 {
+            codewords.push(0u32);
+            continue;
+        }
+
+        let codeword_len = usize::from(len);
+        let codeword = next_codeword[codeword_len];
+
+        // Update the next-codeword table by backtracking from N towards 1.
+        for i in (1..=codeword_len).rev() {
+            if next_codeword[i] & 1 == 1 {
+                if i == 1 {
+                    next_codeword[1] += 1;
+                } else {
+                    next_codeword[i] = next_codeword[i - 1] << 1;
+                }
+                break;
+            }
+            next_codeword[i] += 1;
+        }
+
+        // Propagate branch skipping downward.
+        let branch = next_codeword[codeword_len];
+        for (i, next) in next_codeword[codeword_len..].iter_mut().enumerate().skip(1) {
+            if *next == codeword << i {
+                *next = branch << i;
+            } else {
+                break;
+            }
+        }
+
+        codewords.push(codeword);
+    }
+
+    codewords
+}
+
+// ─── Codebook definitions ─────────────────────────────────────────────────────
+//
+// Book 0: Floor1 class codebook: dim=1, entries=4, uniform len=2, lookup_type=0
+// Book 1: Floor1 value codebook: dim=1, entries=256, uniform len=8, lookup_type=0
+// Book 2: Residue classbook:     dim=1, entries=4,   uniform len=2, lookup_type=0
+// Book 3: Residue VQ book:       dim=1, entries=256, uniform len=8, lookup_type=1
+
+/// Write one codebook to the bit-writer.
+///
+/// # Parameters
+/// * `bw`        — bit writer
+/// * `dim`       — codebook dimensions
+/// * `entries`   — number of entries
+/// * `unif_len`  — uniform codeword length (all entries use this length)
+/// * `lookup_type` — 0 = no VQ, 1 = scalar VQ
+/// * `vq_min`    — VQ minimum value (only used if lookup_type=1)
+/// * `vq_delta`  — VQ delta value (only used if lookup_type=1)
+/// * `vq_value_bits` — VQ value bits (only used if lookup_type=1)
+#[allow(clippy::too_many_arguments)]
+fn write_codebook(
+    bw: &mut BitWriter,
+    dim: u16,
+    entries: u32,
+    unif_len: u8,
+    lookup_type: u8,
+    vq_min: f32,
+    vq_delta: f32,
+    vq_value_bits: u8,
+) {
+    // Sync word: 0x564342 written 24-bit LSB-first
+    bw.write_bits(0x564342, 24);
+    // dimensions (16 bits)
+    bw.write_bits(u64::from(dim), 16);
+    // entries (24 bits)
+    bw.write_bits(u64::from(entries), 24);
+    // ordered flag = 0
+    bw.write_bit(false);
+    // sparse flag = 0 (dense: all entries used)
+    bw.write_bit(false);
+    // For each entry: write length-1 as 5 bits
+    for _ in 0..entries {
+        bw.write_bits(u64::from(unif_len - 1), 5);
+    }
+    // lookup_type (4 bits)
+    bw.write_bits(u64::from(lookup_type), 4);
+    if lookup_type == 1 {
+        // min_float (32 bits packed Vorbis float)
+        bw.write_bits(u64::from(pack_vorbis_float32(vq_min)), 32);
+        // delta_float (32 bits packed Vorbis float)
+        bw.write_bits(u64::from(pack_vorbis_float32(vq_delta)), 32);
+        // value_bits - 1 (4 bits)
+        bw.write_bits(u64::from(vq_value_bits - 1), 4);
+        // sequence_p = 0
+        bw.write_bit(false);
+        // multiplicands: entries values, each vq_value_bits wide
+        for i in 0u32..entries {
+            bw.write_bits(u64::from(i), vq_value_bits);
+        }
+    }
+}
+
 // ─── Identification header ────────────────────────────────────────────────────
 
 /// Build the Vorbis identification header packet (30 bytes).
-///
-/// Layout (Vorbis I spec §5.2.1):
-/// ```text
-/// [1]  packet_type = 0x01
-/// [6]  "vorbis"
-/// [4]  vorbis_version = 0 (LE)
-/// [1]  audio_channels
-/// [4]  audio_sample_rate (LE)
-/// [4]  bitrate_maximum  = 0 (LE)
-/// [4]  bitrate_nominal  = 0 (LE)
-/// [4]  bitrate_minimum  = 0 (LE)
-/// [1]  blocksize byte
-/// [1]  framing_bit = 1
-/// ```
-/// Total: 30 bytes.
 fn write_ident_header(channels: u8, sample_rate: u32) -> Vec<u8> {
-    // log2(256)=8, log2(2048)=11 → blocksize byte = (8) | (11 << 4) = 0xB8
     let log2_bs0 = {
         let mut v = BLOCK_SIZE_0;
         let mut cnt: u8 = 0;
@@ -219,120 +374,89 @@ fn write_ident_header(channels: u8, sample_rate: u32) -> Vec<u8> {
 
 /// Build the Vorbis setup header packet.
 ///
-/// Setup header bitstream (Vorbis I spec §5.2.4):
+/// Codebook set (4 books, indices 0-3):
+///   Book 0: Floor1 class codebook  — dim=1, entries=4,   unif_len=2, lookup=0
+///   Book 1: Floor1 value codebook  — dim=1, entries=256, unif_len=8, lookup=0
+///   Book 2: Residue classbook      — dim=1, entries=4,   unif_len=2, lookup=0
+///   Book 3: Residue VQ book        — dim=1, entries=256, unif_len=8, lookup=1
 ///
-/// **Codebooks (2 total)**
-/// - Codebook 0 (classbook): dim=1, entries=8, uniform length=3, lookup_type=0
-/// - Codebook 1 (VQ book):   dim=1, entries=256, uniform length=8, lookup_type=1
-///   (scalar VQ, minimum=−6.0, delta=12/255 ≈ 0.04706, sequence_p=0)
+/// Floor1: 3 partitions, class 0 (dim=2, subclass_bits=1, mainbook=0),
+///   subbook[0]=0(unused), subbook[1]=2(=book1+1), multiplier=1, rangebits=10.
+///   X posts: 0(implicit), 1024(implicit), 32, 64, 128, 256, 512, 640.
 ///
-/// **Floor (type 1)**
-/// - 1 partition, partition_class[0]=0
-/// - Class 0: dim=2, subclasses=0, subbook[0]=unused (−1)
-/// - multiplier=1, rangebits=10
-/// - Explicit X values: 341 and 682 (10 bits each)
-/// - Implicit endpoints: X=0 and X=1024
+/// Residue type 0: begin=0, end=128, partsize=32, 1 class, classbook=2,
+///   cascade: low_bits=1 (pass 0 active), book[0][0]=4 (=book3+1).
 ///
-/// **Residue (type 0)**
-/// - begin=0, end=128, partition_size=32 (→ 4 partitions)
-/// - 1 classification, classbook=codebook 0
-/// - cascade[0]=0b001 (pass 0 active), book[0][0]=codebook 1
-///
-/// **Mapping (type 0)**: 1 submap, no coupling
-/// **Mode**: long block (blockflag=1), mapping 0
+/// Mapping type 0: no submaps flag, no coupling, reserved=0.
+/// Mode: blockflag=1 (long), windowtype=0, transformtype=0, mapping=0.
 fn write_setup_header(_channels: u8) -> Vec<u8> {
     let mut bw = BitWriter::new();
 
-    // ── Codebooks ────────────────────────────────────────────────────────────
-    // codebook_count - 1 encoded in 8 bits → 1 (= 2 codebooks)
-    bw.write_bits(1, 8); // 2 codebooks (count - 1 = 1)
+    // ── Codebooks ──────────────────────────────────────────────────────────────
+    // codebook_count - 1 in 8 bits → 3 (= 4 codebooks)
+    bw.write_bits(3, 8);
 
-    // ── Codebook 0: classbook ─────────────────────────────────────────────────
-    // Sync pattern: 0x564342 written as 3 bytes LSB-first ('B', 'C', 'V')
-    bw.write_bits(0x42, 8); // 'B'
-    bw.write_bits(0x43, 8); // 'C'
-    bw.write_bits(0x56, 8); // 'V'
-    bw.write_bits(1, 16); // codebook_dimensions = 1
-    bw.write_bits(8, 24); // codebook_entries = 8
-    bw.write_bit(false); // ordered = 0
-    bw.write_bit(false); // sparse = 0
-                         // Non-sparse, non-ordered: codeword lengths as (length-1) in 5 bits per entry
-    for _ in 0..8u32 {
-        bw.write_bits(2, 5); // length-1 = 2 → length = 3 bits (uniform)
-    }
-    bw.write_bits(0, 4); // lookup_type = 0 (no VQ)
+    // Book 0: Floor1 class codebook (dim=1, entries=4, unif_len=2, no VQ)
+    write_codebook(&mut bw, 1, 4, 2, 0, 0.0, 0.0, 0);
 
-    // ── Codebook 1: scalar VQ residue book ───────────────────────────────────
-    bw.write_bits(0x42, 8); // 'B'
-    bw.write_bits(0x43, 8); // 'C'
-    bw.write_bits(0x56, 8); // 'V'
-    bw.write_bits(1, 16); // codebook_dimensions = 1
-    bw.write_bits(256, 24); // codebook_entries = 256
-    bw.write_bit(false); // ordered = 0
-    bw.write_bit(false); // sparse = 0
-                         // 256 entries, length = 8 bits each → length-1 = 7 in 5 bits
-    for _ in 0..256u32 {
-        bw.write_bits(7, 5); // length-1 = 7 → length = 8 bits
-    }
-    // lookup_type = 1 (scalar VQ)
-    bw.write_bits(1, 4);
-    // codebook_minimum_value: −6.0 packed as Vorbis float32
-    let min_packed = pack_vorbis_float32(-MAX_RESIDUE);
-    bw.write_bits(u64::from(min_packed), 32);
-    // codebook_delta_value: 12.0/255 packed as Vorbis float32
-    let delta_packed = pack_vorbis_float32(RESIDUE_DELTA);
-    bw.write_bits(u64::from(delta_packed), 32);
-    // codebook_value_bits - 1: 8-1 = 7 → 4 bits
-    bw.write_bits(7, 4);
-    // codebook_sequence_p = 0
-    bw.write_bit(false);
-    // multiplicands: 256 values × 8 bits each (values 0..255)
-    for i in 0u32..256 {
-        bw.write_bits(u64::from(i), 8);
-    }
+    // Book 1: Floor1 value codebook (dim=1, entries=256, unif_len=8, no VQ)
+    write_codebook(&mut bw, 1, 256, 8, 0, 0.0, 0.0, 0);
 
-    // ── Time domain transforms ────────────────────────────────────────────────
+    // Book 2: Residue classbook (dim=1, entries=4, unif_len=2, no VQ)
+    write_codebook(&mut bw, 1, 4, 2, 0, 0.0, 0.0, 0);
+
+    // Book 3: Residue VQ book (dim=1, entries=256, unif_len=8, lookup_type=1)
+    // min=-0.5, delta=1/255, value_bits=8, sequence_p=0
+    write_codebook(&mut bw, 1, 256, 8, 1, RESIDUE_MIN, RESIDUE_DELTA, 8);
+
+    // ── Time domain transforms ─────────────────────────────────────────────────
     // vorbis_time_count - 1 in 6 bits → 0 (= 1 time transform)
     bw.write_bits(0, 6);
     // Time transform 0: type = 0
     bw.write_bits(0, 16);
 
-    // ── Floor configurations ──────────────────────────────────────────────────
+    // ── Floor configurations ───────────────────────────────────────────────────
     // vorbis_floor_count - 1 in 6 bits → 0 (= 1 floor)
     bw.write_bits(0, 6);
-    // Floor 0: type = 1
+    // Floor 0: type = 1 (16 bits)
     bw.write_bits(1, 16);
 
     // Floor type-1 configuration (spec §6.2.2):
-    // floor1_partitions = 1 (5 bits)
-    bw.write_bits(1, 5);
-    // partition_class_list[0] = 0 (4 bits per entry per spec §6.2.2)
-    bw.write_bits(0, 4);
-    // maximum_class = 0, so configure classes 0..=0:
-    // Class 0: floor1_class_dimensions[0] - 1 = 1 (3 bits → dim=2)
-    bw.write_bits(1, 3);
-    // Class 0: floor1_class_subclasses[0] = 0 (2 bits)
-    bw.write_bits(0, 2);
-    // No masterbook (subclasses=0 → cbits=0)
-    // subbooks: 2^subclasses = 2^0 = 1 subbook slot
-    //   ilog(codebook_count - 1) = ilog(1) = 1 bit per subbook
-    //   0 = unused (-1), 1 = codebook 0
-    //   We want unused → write 0 (1 bit)
-    bw.write_bits(0, 1); // subbook[0] = unused (-1)
+    // floor1_partitions = 3 (5 bits)
+    bw.write_bits(3, 5);
 
-    // floor1_multiplier - 1 = 0 (2 bits → multiplier=1, range=256, Y uses 8 bits)
+    // partition_class_list[0..3] — all class 0 (4 bits each)
+    bw.write_bits(0, 4); // partition 0 → class 0
+    bw.write_bits(0, 4); // partition 1 → class 0
+    bw.write_bits(0, 4); // partition 2 → class 0
+
+    // max_class = 0 → configure class 0:
+    //   dimensions - 1 (3 bits) → 1 → dim=2
+    bw.write_bits(1, 3);
+    //   subclass_bits (2 bits) = 1
+    bw.write_bits(1, 2);
+    //   Since subclass_bits > 0: mainbook (8 bits) = 0 (book 0)
+    bw.write_bits(0, 8);
+    // num_subclasses = 2^1 = 2 → write 2 subbook entries (8 bits each):
+    //   subbook[0] = 0 (unused: value 0 means "no codebook used")
+    bw.write_bits(0, 8);
+    //   subbook[1] = 2 (= book_index + 1 = 1 + 1; decoder subtracts 1 → book 1)
+    bw.write_bits(2, 8);
+
+    // floor1_multiplier - 1 = 0 (2 bits → multiplier=1, range=256)
     bw.write_bits(0, 2);
     // floor1_rangebits = 10 (4 bits) — X positions are 10 bits each
     bw.write_bits(10, 4);
-    // Explicit X values for partition 0 (dim=2): X[2] and X[3]
-    // Total X list after decode: [0(implicit), X[2]=341, X[3]=682, 1024(implicit)]
-    bw.write_bits(341, 10); // X[2] = 341
-    bw.write_bits(682, 10); // X[3] = 682
 
-    // ── Residue configurations ────────────────────────────────────────────────
+    // Explicit X values for all 3 partitions × 2 dims each = 6 posts (10 bits each)
+    for &x in &FLOOR_X_POSTS {
+        bw.write_bits(u64::from(x), 10);
+    }
+
+    // ── Residue configurations ─────────────────────────────────────────────────
     // vorbis_residue_count - 1 in 6 bits → 0 (= 1 residue)
     bw.write_bits(0, 6);
-    // Residue 0: type = 0
+    // Residue 0: type = 0 (16 bits)
     bw.write_bits(0, 16);
     // residue_begin = 0 (24 bits)
     bw.write_bits(RESIDUE_BEGIN as u64, 24);
@@ -342,52 +466,50 @@ fn write_setup_header(_channels: u8) -> Vec<u8> {
     bw.write_bits((PARTITION_SIZE as u64) - 1, 24);
     // residue_classifications - 1 = 0 (6 bits → 1 classification)
     bw.write_bits(0, 6);
-    // residue_classbook = 0 (8 bits → use codebook 0)
-    bw.write_bits(0, 8);
-    // Residue cascade for 1 classification:
-    //   cascade[0]: [3 bits] low_bits = 1 (pass 0 active), [1 bit] has_high = 0
-    bw.write_bits(1, 3); // low_bits = 0b001 → pass 0 active
-    bw.write_bit(false); // has_high = 0 (no high bits)
-                         // For active pass 0: write book index as 8 bits = codebook 1
-    bw.write_bits(1, 8); // book[class=0][pass=0] = codebook 1
+    // residue_classbook = 2 (8 bits → use book 2)
+    bw.write_bits(2, 8);
+    // cascade for class 0: low_bits=1 (pass 0 active), has_high=0
+    bw.write_bits(1, 3); // low_bits = 0b001 (pass 0 active)
+    bw.write_bit(false); // has_high = 0
+                         // For the one active pass (pass 0): write book index = 3 (8 bits, must be nonzero < max_codebook=4)
+                         // Symphonia checks: book != 0 && book < max_codebook. Book 3 → write 3 (no +1 for residue books).
+    bw.write_bits(3, 8);
 
-    // ── Mapping configurations ────────────────────────────────────────────────
+    // ── Mapping configurations ─────────────────────────────────────────────────
     // vorbis_mapping_count - 1 in 6 bits → 0 (= 1 mapping)
     bw.write_bits(0, 6);
-    // Mapping 0: type = 0
+    // Mapping 0: type = 0 (16 bits)
     bw.write_bits(0, 16);
-    // submaps_flag [1 bit] — if 0: 1 submap; if 1: read submap count (4 bits) + 1
-    bw.write_bit(false); // 1 submap (no explicit count)
-                         // coupling_flag [1 bit] = 0 (no M/S coupling)
+    // submaps_flag [1 bit] = 0 → 1 submap (no explicit count)
     bw.write_bit(false);
-    // reserved [2 bits] = 0 (spec requires these be 0)
+    // coupling_flag [1 bit] = 0 (no M/S coupling)
+    bw.write_bit(false);
+    // reserved [2 bits] = 0 (MUST be zero per spec)
     bw.write_bits(0, 2);
-    // Per-channel submap assignment: each channel → submap 0
-    // ilog(submaps-1) = ilog(0) = 0 bits per channel assignment
-    // So nothing to write for channel assignments when there is only 1 submap.
+    // Per-channel submap assignment: none written when submaps=1 (ilog(0)=0 bits)
 
     // Submap 0 configuration:
-    //   submap_time_config: [8 bits] = 0
-    //   submap_floor_config: [8 bits] = 0
-    //   submap_residue_config: [8 bits] = 0
-    bw.write_bits(0, 8); // submap_time_config
-    bw.write_bits(0, 8); // submap_floor_config
-    bw.write_bits(0, 8); // submap_residue_config
+    //   time_config  (8 bits) = 0
+    //   floor_config (8 bits) = 0
+    //   residue_cfg  (8 bits) = 0
+    bw.write_bits(0, 8);
+    bw.write_bits(0, 8);
+    bw.write_bits(0, 8);
 
-    // ── Mode configurations ───────────────────────────────────────────────────
+    // ── Mode configurations ────────────────────────────────────────────────────
     // vorbis_mode_count - 1 in 6 bits → 0 (= 1 mode)
     bw.write_bits(0, 6);
     // Mode 0:
     //   blockflag [1 bit] = 1 (long block)
+    bw.write_bit(true);
     //   windowtype [16 bits] = 0
+    bw.write_bits(0, 16);
     //   transformtype [16 bits] = 0
+    bw.write_bits(0, 16);
     //   mapping [8 bits] = 0
-    bw.write_bit(true); // blockflag = 1 (long)
-    bw.write_bits(0, 16); // windowtype
-    bw.write_bits(0, 16); // transformtype
-    bw.write_bits(0, 8); // mapping
+    bw.write_bits(0, 8);
 
-    // ── Framing bit ──────────────────────────────────────────────────────────
+    // ── Framing bit ────────────────────────────────────────────────────────────
     bw.write_bit(true); // framing_bit = 1
 
     let packed = bw.finalize();
@@ -400,24 +522,26 @@ fn write_setup_header(_channels: u8) -> Vec<u8> {
     pkt
 }
 
-// ─── MDCT forward transform ───────────────────────────────────────────────────
+// ─── MDCT forward transform (Vorbis window) ───────────────────────────────────
 
 /// Vorbis MDCT analysis: transform `BLOCK_SIZE_1 = 2048` samples to
 /// `N_COEFFS = 1024` real spectral coefficients.
 ///
-/// Follows the standard pre-rotation / FFT / post-rotation decomposition
-/// (identical pattern to `opus_mdct::mdct_forward` but with N=2048).
-///
-/// Window: `w[k] = sin(π · (k + ½) / N)`, k ∈ [0, N)
+/// Uses the exact Vorbis window:
+///   w[k] = sin(π/2 · sin²(π/2 · (k+½)/N))
+/// which is the `generate_win_curve` function from symphonia's window.rs.
 fn vorbis_mdct(samples: &[f32]) -> Vec<f32> {
     let n = BLOCK_SIZE_1; // 2048
     let n2 = N_COEFFS; // 1024
 
-    // Use as many samples as available; pad with zeros if shorter than N.
+    // Apply the Vorbis window (exact synthesis window).
     let windowed: Vec<f32> = (0..n)
         .map(|k| {
             let s = if k < samples.len() { samples[k] } else { 0.0 };
-            let w = (std::f32::consts::PI * (k as f32 + 0.5) / n as f32).sin();
+            // Vorbis window: sin(π/2 · sin²(π/2 · (k+½)/N))
+            let frac = std::f32::consts::FRAC_PI_2 * (k as f32 + 0.5) / n as f32;
+            let sin_frac = frac.sin();
+            let w = (std::f32::consts::FRAC_PI_2 * sin_frac * sin_frac).sin();
             s * w
         })
         .collect();
@@ -449,26 +573,243 @@ fn vorbis_mdct(samples: &[f32]) -> Vec<f32> {
         .collect()
 }
 
+// ─── Floor1 synthesis (encoder-side closed-loop) ──────────────────────────────
+
+/// `render_point`: integer linear interpolation from symphonia floor.rs.
+#[inline(always)]
+fn render_point(x0: u32, y0: i32, x1: u32, y1: i32, x: u32) -> i32 {
+    let dy = y1 - y0;
+    let adx = x1 - x0;
+    let err = dy.unsigned_abs() * (x - x0);
+    let off = err / adx;
+    if dy < 0 {
+        y0 - off as i32
+    } else {
+        y0 + off as i32
+    }
+}
+
+/// `render_line`: fill floor array from x0 to x1 using the Vorbis ramp algorithm.
+fn render_line(x0: u32, y0: i32, x1: u32, y1: i32, n: usize, v: &mut [f32]) {
+    if x0 as usize >= n {
+        return;
+    }
+
+    let dy = y1 - y0;
+    let adx = (x1 - x0) as i32;
+    let base = dy / adx;
+    let mut y = y0;
+    let sy = if dy < 0 { base - 1 } else { base + 1 };
+    let ady = dy.abs() - base.abs() * adx;
+
+    let y_clamped = y.clamp(0, 255) as usize;
+    v[x0 as usize] = FLOOR1_INVERSE_DB_TABLE[y_clamped];
+
+    let mut err = 0i32;
+    let x_begin = x0 as usize + 1;
+    let x_end = (x1 as usize).min(n);
+
+    if x_begin > x_end {
+        return;
+    }
+
+    for vv in v[x_begin..x_end].iter_mut() {
+        err += ady;
+        y += if err >= adx {
+            err -= adx;
+            sy
+        } else {
+            base
+        };
+        let yc = y.clamp(0, 255) as usize;
+        *vv = FLOOR1_INVERSE_DB_TABLE[yc];
+    }
+}
+
+/// Synthesise the floor1 curve from the Y values that the decoder would reconstruct.
+///
+/// This is the encoder-side closed-loop floor synthesis, mirroring symphonia's
+/// `Floor1::synthesis_step1` + `synthesis_step2`.
+///
+/// The full X list (as the decoder sees it) is:
+///   index 0: x=0  (implicit)
+///   index 1: x=1024 (implicit, = 1 << rangebits)
+///   index 2..7: FLOOR_X_POSTS (explicit, read in partition order)
+///
+/// Returns a Vec<f32> of length N_COEFFS with the linear floor multiplier per bin.
+fn synthesise_floor1_curve(floor_y: &[i32; N_FLOOR_Y]) -> Vec<f32> {
+    // Full X list in decoder read order: [0, 1024, 32, 64, 128, 256, 512, 640]
+    let full_x: [u32; N_FLOOR_Y] = [0, 1024, 32, 64, 128, 256, 512, 640];
+
+    let n = N_COEFFS as u32; // 1024
+
+    // Multiplier = 1, range = 256.
+    // Step 1: unconditionally mark endpoints; compute step2_flag for explicit posts.
+    let mut step2_flag = [false; N_FLOOR_Y];
+    let mut final_y = [0i32; N_FLOOR_Y];
+    let range = 256i32;
+
+    step2_flag[0] = true;
+    step2_flag[1] = true;
+    final_y[0] = floor_y[0];
+    final_y[1] = floor_y[1];
+
+    // For posts 2..N_FLOOR_Y, find neighbours and compute final_y.
+    for i in 2..N_FLOOR_Y {
+        // Find low_neighbor and high_neighbor (positions in full_x before index i).
+        let bound = full_x[i];
+        let mut low_x = u32::MIN;
+        let mut high_x = u32::MAX;
+        let mut low_idx = 0usize;
+        let mut high_idx = 1usize;
+        for (j, &xv) in full_x[..i].iter().enumerate() {
+            if xv > low_x && xv < bound {
+                low_x = xv;
+                low_idx = j;
+            }
+            if xv < high_x && xv > bound {
+                high_x = xv;
+                high_idx = j;
+            }
+        }
+
+        let predicted = render_point(
+            full_x[low_idx],
+            final_y[low_idx],
+            full_x[high_idx],
+            final_y[high_idx],
+            full_x[i],
+        );
+
+        let val = floor_y[i];
+        let highroom = range - predicted;
+        let lowroom = predicted;
+
+        if val != 0 {
+            let room = 2 * if highroom < lowroom {
+                highroom
+            } else {
+                lowroom
+            };
+
+            step2_flag[low_idx] = true;
+            step2_flag[high_idx] = true;
+            step2_flag[i] = true;
+
+            final_y[i] = if val >= room {
+                if highroom > lowroom {
+                    val - lowroom + predicted
+                } else {
+                    predicted - val + highroom - 1
+                }
+            } else {
+                if val & 1 == 1 {
+                    predicted - ((val + 1) / 2)
+                } else {
+                    predicted + (val / 2)
+                }
+            };
+        } else {
+            step2_flag[i] = false;
+            final_y[i] = predicted;
+        }
+    }
+
+    // Step 2: render lines in sort order.
+    // Sort indices by X value.
+    let mut sort_order: Vec<usize> = (0..N_FLOOR_Y).collect();
+    sort_order.sort_by_key(|&i| full_x[i]);
+
+    let mut floor = vec![0.0f32; N_COEFFS];
+
+    let multiplier = 1i32;
+    let ly0 = final_y[sort_order[0]] * multiplier;
+    let ly0 = ly0.clamp(0, 255);
+
+    let mut hx = 0u32;
+    let mut hy = 0i32;
+    let mut lx = 0u32;
+    let mut ly = ly0;
+
+    for &i in &sort_order[1..] {
+        if step2_flag[i] {
+            hy = (final_y[i] * multiplier).clamp(0, 255);
+            hx = full_x[i];
+            render_line(lx, ly, hx, hy, N_COEFFS, &mut floor);
+            lx = hx;
+            ly = hy;
+        }
+    }
+
+    if hx < n {
+        render_line(hx, hy, n, hy, N_COEFFS, &mut floor);
+    }
+
+    floor
+}
+
+// ─── Floor1 Y value computation ──────────────────────────────────────────────
+
+/// Compute floor1 Y values for a given MDCT frame.
+///
+/// For each X post position, we compute the magnitude and find the best
+/// matching Y value (0..255) such that FLOOR1_INVERSE_DB_TABLE[y] approximates
+/// the signal magnitude at that frequency bin.
+///
+/// The floor encoding uses:
+/// - Y[0] and Y[1]: explicit endpoints, written as 8-bit values (range=256, multiplier=1)
+/// - Y[2..N_FLOOR_Y]: explicit posts, written via class+subbook scheme
+///
+/// Returns `[i32; N_FLOOR_Y]` with values in [0, 255].
+fn compute_floor_y(mdct: &[f32]) -> [i32; N_FLOOR_Y] {
+    // Build inverse lookup: for each possible magnitude, find the best y index.
+    // FLOOR1_INVERSE_DB_TABLE is monotonically increasing (0..255 → small..large).
+    // Given a magnitude m, find y such that FLOOR1_INVERSE_DB_TABLE[y] >= m.
+    let magnitude_to_y = |mag: f32| -> i32 {
+        if mag <= FLOOR1_INVERSE_DB_TABLE[0] {
+            return 0;
+        }
+        if mag >= FLOOR1_INVERSE_DB_TABLE[255] {
+            return 255;
+        }
+        // Binary search
+        let mut lo = 0usize;
+        let mut hi = 255usize;
+        while lo + 1 < hi {
+            let mid = (lo + hi) / 2;
+            if FLOOR1_INVERSE_DB_TABLE[mid] < mag {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        // Return whichever is closer
+        let dist_lo = (FLOOR1_INVERSE_DB_TABLE[lo] - mag).abs();
+        let dist_hi = (FLOOR1_INVERSE_DB_TABLE[hi] - mag).abs();
+        if dist_lo <= dist_hi {
+            lo as i32
+        } else {
+            hi as i32
+        }
+    };
+
+    // Full X list (decoder read order):
+    let full_x: [u32; N_FLOOR_Y] = [0, 1024, 32, 64, 128, 256, 512, 640];
+
+    let mut y = [0i32; N_FLOOR_Y];
+    for (i, &x) in full_x.iter().enumerate() {
+        // Use the MDCT bin at position x (or average around it for smoothness).
+        let bin = (x as usize).min(N_COEFFS - 1);
+        // Take the magnitude at this bin (absolute value of MDCT coefficient).
+        let mag = mdct[bin].abs();
+        y[i] = magnitude_to_y(mag);
+    }
+    y
+}
+
 // ─── Vorbis VBR quality control ───────────────────────────────────────────────
 
-/// Vorbis encoder quality level, analogous to oggenc/libvorbis quality settings.
-///
-/// - `quality = -0.1` (q-1): very low quality, ~45 kbps
-/// - `quality = 0.0` (q0): low quality, ~64 kbps
-/// - `quality = 0.4` (q4): medium quality, ~128 kbps (default)
-/// - `quality = 0.7` (q7): high quality, ~224 kbps
-/// - `quality = 1.0` (q10): maximum quality, ~500 kbps
-///
-/// The quality value maps to:
-/// - A silence threshold controlling which frames are encoded as active vs. silent.
-///   At higher quality, even quieter frames are fully encoded.
-/// - A quantization scale factor that affects how MDCT coefficients are quantized
-///   (finer granularity at higher quality).
-///
-/// Note: with the current fixed-length uniform 8-bit codebook, the residue scale
-/// factor shifts quantization precision but does not change per-frame byte count for
-/// non-silent frames. File size differences arise primarily through the silence
-/// threshold suppressing low-energy frames at lower quality settings.
+/// Vorbis encoder quality level.
 #[derive(Debug, Clone, Copy)]
 pub struct VorbisQuality(f32);
 
@@ -488,80 +829,53 @@ impl VorbisQuality {
         Self::new(level as f32 / 10.0)
     }
 
-    /// Quantization scale factor: lower quality → larger step → coarser quantization.
-    ///
-    /// Returns a multiplier for the effective residue delta value.
-    ///
-    /// - q=1.0 → scale = 1.0 (finest quantization)
-    /// - q=0.4 → scale ≈ 5.2 (default)
-    /// - q=0.0 → scale = 8.0
-    /// - q=−0.1 → scale ≈ 10.0 (coarsest)
+    /// Silence threshold for this quality level.
+    pub fn silence_threshold(&self) -> f32 {
+        let q = self.0.max(0.0);
+        let threshold_db = -40.0 - q * 40.0;
+        10.0f32.powf(threshold_db / 20.0)
+    }
+
+    /// Quantization scale factor (residue_delta_scale).
     pub fn residue_delta_scale(&self) -> f32 {
         let q = self.0;
         let scale = if q >= 0.0 {
-            1.0 + (1.0 - q) * 7.0 // linear: 8.0 at q=0 → 1.0 at q=1
+            1.0 + (1.0 - q) * 7.0
         } else {
-            8.0 + (-q) * 20.0 // 8.0 at q=0 → 10.0 at q=−0.1
+            8.0 + (-q) * 20.0
         };
         scale.clamp(0.5, 10.0)
-    }
-
-    /// Silence threshold: frames whose RMS amplitude is below this value are
-    /// encoded as silent (floor_nonzero = 0, no residue bits).
-    ///
-    /// At higher quality, even quieter frames are fully encoded:
-    /// - q=1.0 → threshold ≈ −80 dBFS (encodes near-silence)
-    /// - q=0.4 → threshold ≈ −56 dBFS (default)
-    /// - q=0.0 → threshold ≈ −40 dBFS (skips quiet frames)
-    /// - q=−0.1 → same floor as q=0.0
-    pub fn silence_threshold(&self) -> f32 {
-        let q = self.0.max(0.0);
-        // Linear mapping from -40 dBFS (q=0) to -80 dBFS (q=1).
-        let threshold_db = -40.0 - q * 40.0;
-        10.0f32.powf(threshold_db / 20.0)
     }
 }
 
 // ── Psychoacoustic Model ──────────────────────────────────────────────────────
 
 /// Absolute threshold of hearing in dB SPL at frequency `f_hz` (Hz).
-///
-/// Uses the Terhardt (1979) approximation.
+#[cfg(test)]
 fn ath_db(f_hz: f32) -> f32 {
     let f_khz = f_hz / 1000.0;
     3.64 * f_khz.powf(-0.8) - 6.5 * (-0.6 * (f_khz - 3.3).powi(2)).exp() + 1e-3 * f_khz.powi(4)
 }
 
-/// Convert frequency in Hz to Bark scale (Zwicker 1961).
-///
-/// Uses the Traunmüller (1990) approximation: `26.81·f/(1960+f) − 0.53`.
+/// Convert frequency in Hz to Bark scale.
+#[cfg(test)]
 fn hz_to_bark(f_hz: f32) -> f32 {
     26.81 * f_hz / (1960.0 + f_hz) - 0.53
 }
 
-/// Spreading function: masking attenuation (dB) from a tone at `bark_masker`
-/// affecting a maskee at `bark_maskee`.
-///
-/// Negative return means the masker reduces the perceivable level of the maskee
-/// (i.e. masking effect). Uses Johnston (1988) slopes:
-/// - Downward spread (masker above maskee): 27 dB/Bark
-/// - Upward spread (masker below maskee): `(−17.5 + 0.4·bark_masker)` dB/Bark
+/// Spreading function: masking attenuation (dB).
+#[cfg(test)]
 fn spreading_db(bark_masker: f32, bark_maskee: f32) -> f32 {
     let delta = bark_maskee - bark_masker;
     if delta < 0.0 {
-        // Maskee is below masker: fast upward-spread falloff
         27.0 * delta
     } else {
-        // Maskee is above masker: slower downward-spread
         (-17.5 + 0.4 * bark_masker) * delta
     }
 }
 
 /// Compute per-bin masking threshold from MDCT coefficients.
-///
-/// Returns a `Vec<f32>` of length `mdct.len()` giving the minimum perceivable
-/// energy at each spectral bin (linear energy units, same scale as `mdct[k]^2`).
-/// The threshold is the maximum of the ATH and the spread of all Bark-band peaks.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn compute_masking_threshold(mdct: &[f32], sample_rate: u32) -> Vec<f32> {
     let n_bins = mdct.len();
@@ -571,8 +885,6 @@ pub(crate) fn compute_masking_threshold(mdct: &[f32], sample_rate: u32) -> Vec<f
     let freq_resolution = sample_rate as f32 / (2.0 * n_bins as f32);
     let n_bark: usize = 24;
 
-    // Precompute Bark values per bin, clamped to [0, n_bark-1] to avoid negative
-    // or out-of-range indices when flooring to usize later.
     let bark_of_bin: Vec<f32> = (0..n_bins)
         .map(|k| {
             let f_hz = ((k as f32 + 0.5) * freq_resolution).max(20.0);
@@ -580,7 +892,6 @@ pub(crate) fn compute_masking_threshold(mdct: &[f32], sample_rate: u32) -> Vec<f
         })
         .collect();
 
-    // Convert ATH to linear energy per bin: ath_linear[k] = 10^(ath_db(f_k)/10)
     let ath_linear: Vec<f32> = (0..n_bins)
         .map(|k| {
             let f_hz = ((k as f32 + 0.5) * freq_resolution).max(20.0);
@@ -588,7 +899,6 @@ pub(crate) fn compute_masking_threshold(mdct: &[f32], sample_rate: u32) -> Vec<f
         })
         .collect();
 
-    // Compute signal energy per bin and find maximum energy per Bark band.
     let energy: Vec<f32> = mdct.iter().map(|&x| x * x).collect();
     let mut bark_max_energy = vec![0.0f32; n_bark];
     for (k, &e) in energy.iter().enumerate() {
@@ -598,17 +908,15 @@ pub(crate) fn compute_masking_threshold(mdct: &[f32], sample_rate: u32) -> Vec<f
         }
     }
 
-    // Compute masking threshold at each bin: max over ATH and all masker contributions.
     let mut threshold = ath_linear;
     for (k, thresh) in threshold.iter_mut().enumerate() {
         let bark_k = bark_of_bin[k];
         for (band, &masker_energy) in bark_max_energy.iter().enumerate() {
             if masker_energy < 1e-20 {
-                continue; // skip silent bands
+                continue;
             }
             let bark_masker = band as f32 + 0.5;
             let spread = spreading_db(bark_masker, bark_k);
-            // masked energy = masker_energy × 10^(spread_dB / 10)
             let masked = masker_energy * 10.0f32.powf(spread / 10.0);
             if masked > *thresh {
                 *thresh = masked;
@@ -619,26 +927,13 @@ pub(crate) fn compute_masking_threshold(mdct: &[f32], sample_rate: u32) -> Vec<f
     threshold
 }
 
-/// Compute Y[0] and Y[1] floor endpoint values using a psychoacoustic masking threshold.
-///
-/// Uses the geometric mean of the masking threshold over the full spectrum as the
-/// floor level, mapped from dB to the [0, 255] range. Both endpoints use the same
-/// value (flat floor approximation); this keeps the bitstream change minimal.
-fn compute_floor_y_psychoacoustic(mdct: &[f32], mask: &[f32]) -> (u8, u8) {
-    // Fall back to a silent floor if there are no bins.
+/// Compute Y[0] and Y[1] floor endpoint values using psychoacoustic masking.
+#[cfg(test)]
+fn compute_floor_y_psychoacoustic(_mdct: &[f32], mask: &[f32]) -> (u8, u8) {
     let n = mask.len().max(1);
-
-    // Geometric mean of masking threshold in log scale.
     let log_mean_mask: f32 = mask.iter().map(|&m| m.max(1e-30).log10()).sum::<f32>() / n as f32;
-
-    // Convert to dB (energy domain: 10·log10) and map to [0, 255].
-    // Mapping: −60 dB → 0, +60 dB → 255 (linear over 120 dB range).
     let db = 10.0 * log_mean_mask;
     let y = ((db + 60.0) * 255.0 / 120.0).clamp(0.0, 255.0) as u8;
-
-    // Also derive a high-frequency Y using the upper-half of mdct energy to give
-    // a slight frequency-shaping benefit without adding API complexity.
-    // For simplicity, derive from the high-frequency portion of the mask.
     let hi_start = n / 2;
     let hi_n = (n - hi_start).max(1);
     let log_mean_hi: f32 = mask[hi_start..]
@@ -648,131 +943,218 @@ fn compute_floor_y_psychoacoustic(mdct: &[f32], mask: &[f32]) -> (u8, u8) {
         / hi_n as f32;
     let db_hi = 10.0 * log_mean_hi;
     let y1 = ((db_hi + 60.0) * 255.0 / 120.0).clamp(0.0, 255.0) as u8;
-
-    // Suppress unused-variable warning: mdct is passed for potential future use
-    // (e.g. per-band Y values derived from signal vs mask ratio).
-    let _ = mdct;
-
     (y, y1)
-}
-
-// ─── Residue quantisation ─────────────────────────────────────────────────────
-
-/// Quantise a single MDCT coefficient to a residue VQ index in [0, 255].
-///
-/// The VQ table covers [−MAX_RESIDUE, +MAX_RESIDUE] uniformly in 256 steps
-/// scaled by `quality_scale`.  A larger scale means coarser quantization (lower quality).
-///
-/// Note: the decoder reconstructs `value = min + index * delta` using the fixed
-/// setup-header delta value.  The `quality_scale` here affects which bin is
-/// selected but not the transmitted codebook — perceptually, coarser quantization
-/// at lower quality means less spectral fidelity.
-fn quantise_residue(coeff: f32, quality_scale: f32) -> u8 {
-    let effective_delta = RESIDUE_DELTA * quality_scale;
-    let idx = ((coeff - (-MAX_RESIDUE)) / effective_delta).round() as i32;
-    idx.clamp(0, (RESIDUE_ENTRIES - 1) as i32) as u8
 }
 
 // ─── Audio packet encoder ─────────────────────────────────────────────────────
 
 /// Encode one MDCT audio frame for all channels.
 ///
-/// Packet layout (Vorbis I spec §4.3.1):
-/// ```text
-/// [1]  packet_type = 0 (audio)
-/// [0]  mode_number  (ilog(0) = 0 bits for 1 mode)
-/// [1]  previous_window_flag  (blockflag=1 → required)
-/// [1]  next_window_flag      (blockflag=1 → required)
-/// per channel:
-///   [1]  floor_nonzero  (1 = active)
-///   [8]  Y[0] endpoint at X=0   (range=256, multiplier=1)
-///   [8]  Y[1] endpoint at X=1024
-///   (no partition dim bits: subbooks are unused → Y[2]=Y[3] implicit = 0)
-/// all channels residue (type 0):
-///   per channel:
-///     [3]  classbook code (codebook 0, dim=1, len=3)
-///   per channel × 4 partitions × 32 values:
-///     [8]  VQ index (codebook 1, len=8)
-/// ```
+/// This implements the full Vorbis I audio packet encoding:
+/// 1. Floor type-1 encoding with 8 X-posts and correct codebook field widths.
+/// 2. Residue type-0 encoding using canonical codewords for both classbook and VQ.
+/// 3. Closed-loop floor synthesis to compute accurate residuals.
 fn encode_audio_packet(
     channels: usize,
     prev_long: bool,
     next_long: bool,
     mdct_per_channel: &[Vec<f32>],
     quality: VorbisQuality,
-    sample_rate: u32,
+    _sample_rate: u32,
 ) -> Vec<u8> {
     let mut bw = BitWriter::new();
 
     // packet_type = 0 (audio). Must be the first bit.
     bw.write_bit(false);
 
-    // mode_number: ilog(1 - 1) = 0 bits → nothing.
+    // mode_number: ilog(1 - 1) = ilog(0) = 0 bits → nothing to write.
 
     // blockflag=1 → must write previous/next window flags.
     bw.write_bit(prev_long);
     bw.write_bit(next_long);
 
-    // Silence threshold (RMS amplitude) from quality level.
-    let silence_threshold = quality.silence_threshold();
-    let delta_scale = quality.residue_delta_scale();
+    // Precompute canonical codewords for each book:
+    // Book 0: uniform len=2, 4 entries → canonical = [0,1,2,3]
+    let book0_lens: Vec<u8> = vec![2; 4];
+    let book0_cw = canonical_codewords(&book0_lens); // [0b00, 0b01, 0b10, 0b11]
 
-    // ── Per-channel floor ─────────────────────────────────────────────────────
-    let mut floor_y: Vec<(u8, u8)> = Vec::with_capacity(channels);
-    let mut has_audio = false;
+    // Book 1: uniform len=8, 256 entries → canonical[i] = i
+    // (no need to precompute; for uniform 8-bit, codeword[i] = i)
+
+    // Book 2: uniform len=2, 4 entries → canonical = [0,1,2,3]
+    let book2_lens: Vec<u8> = vec![2; 4];
+    let book2_cw = canonical_codewords(&book2_lens);
+
+    // Book 3: uniform len=8, 256 entries → canonical[i] = i
+    // (same as book 1 — codeword[i] = i, 8-bit)
+
+    let silence_threshold = quality.silence_threshold();
+
+    // ── Per-channel floor encoding ─────────────────────────────────────────────
+    // For each channel:
+    // - floor_nonzero [1 bit]
+    // - If nonzero:
+    //   - Y[0] [8 bits] (endpoint at X=0, range=256, multiplier=1 → 8-bit)
+    //   - Y[1] [8 bits] (endpoint at X=1024)
+    //   - For each partition (3 partitions × dim=2 posts each):
+    //     - classword via book0 [2 bits]: encodes 2 subclass values
+    //     - For each "active subclass" post: emit Y value via book1 [8 bits]
+
+    let mut floor_y_per_ch: Vec<[i32; N_FLOOR_Y]> = Vec::with_capacity(channels);
+    let mut ch_nonzero: Vec<bool> = Vec::with_capacity(channels);
 
     for coeffs in mdct_per_channel.iter().take(channels) {
-        // Compute RMS energy and compare against quality-dependent silence threshold.
+        // RMS check for silence
         let energy: f32 = coeffs.iter().map(|&c| c * c).sum::<f32>();
         let rms = (energy / coeffs.len() as f32).sqrt();
+
         if rms < silence_threshold {
-            // Silence → floor_nonzero = 0.
-            bw.write_bit(false);
-            floor_y.push((0, 0));
+            bw.write_bit(false); // floor_nonzero = 0
+            floor_y_per_ch.push([0i32; N_FLOOR_Y]);
+            ch_nonzero.push(false);
         } else {
-            has_audio = true;
             bw.write_bit(true); // floor_nonzero = 1
-            let mask = compute_masking_threshold(coeffs, sample_rate);
-            let (y0, y1) = compute_floor_y_psychoacoustic(coeffs, &mask);
-            bw.write_bits(u64::from(y0), 8); // Y[0] at X=0
-            bw.write_bits(u64::from(y1), 8); // Y[1] at X=1024
-                                             // Partition dims 2..3 use subbook=-1 → no bits written, Y=0 implicit.
-            floor_y.push((y0, y1));
+            ch_nonzero.push(true);
+
+            // Compute Y values from MDCT spectrum.
+            let y = compute_floor_y(coeffs);
+            floor_y_per_ch.push(y);
+
+            // Write Y[0] and Y[1] (endpoints, 8 bits each).
+            bw.write_bits(y[0] as u64, 8);
+            bw.write_bits(y[1] as u64, 8);
+
+            // Write 3 partitions × 1 classword + 2 explicit posts each.
+            // Class 0 has dim=2, subclass_bits=1, mainbook=0.
+            // Each classword from book0 encodes 2 subclass values packed as:
+            //   cval = sub0 | (sub1 << 1)
+            //   We always use subclass=1 (explicit coding) → sub0=1, sub1=1 → cval=3.
+            //   But for floor1, the decoder reads:
+            //     cval = read_scalar(mainbook=book0)
+            //     for each dim post:
+            //       subclass_idx = cval & csub (csub = (1<<1)-1 = 1)
+            //       cval >>= cbits (cbits=1)
+            //       if is_subbook_used (subclass_idx=1 → subbook[1]=1 → used):
+            //         y = read_scalar(subbook[1]=book1)
+            //       else (subclass_idx=0 → subbook[0]=unused):
+            //         y = 0 (implicit)
+            //
+            // So: to emit both posts explicitly, set sub0=1 and sub1=1 → cval=3.
+            // cval=3 → canonical codeword for book0[3] = book0_cw[3] (2 bits).
+            // Then emit y[2] via book1 (8 bits), then y[3] via book1 (8 bits).
+            //
+            // Partition 0 → y[2], y[3]  (posts at X=32, X=64)
+            // Partition 1 → y[4], y[5]  (posts at X=128, X=256)
+            // Partition 2 → y[6], y[7]  (posts at X=512, X=640)
+
+            for part in 0..3usize {
+                let y0_idx = 2 + part * 2;
+                let y1_idx = y0_idx + 1;
+
+                // cval = sub0=1 | (sub1=1 << 1) = 3 → both posts explicitly coded
+                let cval = 3u64;
+                bw.write_bits(book0_cw[cval as usize] as u64, 2);
+
+                // First post (subclass=1 → use book1): y[y0_idx] via book1 (8 bits)
+                // For uniform 8-bit book, canonical codeword[v] = v.
+                let v0 = (y[y0_idx] as u64) & 0xFF;
+                bw.write_bits(v0, 8);
+
+                // Second post (subclass=1 → use book1): y[y1_idx]
+                let v1 = (y[y1_idx] as u64) & 0xFF;
+                bw.write_bits(v1, 8);
+            }
         }
     }
 
-    // ── Residue encoding (only when at least one channel has audio) ───────────
-    // Residue type 0: sequential per channel.
-    // Spec §8.6.2: for each channel, read 1 classbook code, then residue partitions.
+    // ── Residue encoding (type 0) ─────────────────────────────────────────────
+    // For residue type 0, the spec reads all channels before moving to next partition.
+    // Order for each pass/partition_batch:
+    //   For each channel: read classbook (book2)
+    //   For each channel × partition: if class[part] is used, read VQ (book3)
+    //
+    // We always use class=1 for all partitions, so all VQ books are active.
+    // classbook (book2, dim=1) encodes 1 partition class per decode.
+    // parts_per_classword = dim(book2) = 1.
+    // n_partitions = 4 (128/32).
+    //
+    // For pass 0, for each partition_batch (step_by=1):
+    //   For each channel: emit classword for class=1 via book2 (2 bits).
+    //   For each channel × partition:
+    //     If class is used: emit 32 VQ values via book3 (8 bits each).
+
+    // Only emit residue when at least one channel is non-silent.
+    let has_audio = ch_nonzero.iter().any(|&v| v);
     if has_audio {
-        for ch in 0..channels {
-            let (y0, _y1) = floor_y[ch];
-            if y0 == 0 {
-                // This channel was silent → floor_nonzero=0, no residue for it.
-                // But residue type 0 is decoded for ALL channels in one pass.
-                // For a silent channel we still write residue (spec decodes them all).
-                // Write classbook code = 0 (3 bits, all zeros).
-                bw.write_bits(0, 3);
-                // Write zero-index for all 4 partitions × 32 values.
-                for _ in 0..N_PARTITIONS {
-                    for _ in 0..PARTITION_SIZE {
-                        bw.write_bits(0, 8);
-                    }
+        // Synthesise floor curves for closed-loop residual computation.
+        let floor_curves: Vec<Vec<f32>> = (0..channels)
+            .map(|ch| {
+                if ch_nonzero[ch] {
+                    synthesise_floor1_curve(&floor_y_per_ch[ch])
+                } else {
+                    vec![0.0f32; N_COEFFS]
                 }
-            } else {
+            })
+            .collect();
+
+        // Compute normalised residuals.
+        // r[ch][k] = mdct[ch][k] / floor_curve[k]  (avoid div by zero)
+        let residuals: Vec<Vec<f32>> = (0..channels)
+            .map(|ch| {
                 let coeffs = &mdct_per_channel[ch];
-                // Classbook code = 0 (3 bits from codebook 0 with uniform len=3).
-                bw.write_bits(0, 3);
-                // 4 partitions × 32 values, each quantised to 8-bit VQ index
-                // using the quality-scaled effective delta.
-                for p in 0..N_PARTITIONS {
-                    let base = RESIDUE_BEGIN + p * PARTITION_SIZE;
-                    for j in 0..PARTITION_SIZE {
-                        let bin = base + j;
-                        let coeff = if bin < coeffs.len() { coeffs[bin] } else { 0.0 };
-                        let idx = quantise_residue(coeff, delta_scale);
-                        bw.write_bits(u64::from(idx), 8);
-                    }
+                let floor = &floor_curves[ch];
+                (0..N_COEFFS)
+                    .map(|k| {
+                        let fv = floor[k].max(1e-8);
+                        coeffs[k] / fv
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Quantise residuals.
+        let quantised: Vec<Vec<u8>> = residuals
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|&v| {
+                        let idx = ((v - RESIDUE_MIN) / RESIDUE_DELTA).round() as i32;
+                        idx.clamp(0, (RESIDUE_ENTRIES - 1) as i32) as u8
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Residue type 0 encoding loop.
+        // parts_per_classword = dim(classbook=book2) = 1.
+        // For each partition batch (each partition, since ppc=1):
+        //   For each channel: emit class via book2 (2 bits for class=1).
+        //   For each channel: emit 32 VQ values via book3 (8 bits each).
+        for part in 0..N_PARTITIONS {
+            // Classword phase: for each channel, emit class=1 via book2.
+            for (ch, &nonzero) in ch_nonzero.iter().take(channels).enumerate() {
+                let _ = ch;
+                if nonzero {
+                    // class=1 → canonical codeword for book2[1] (2 bits)
+                    bw.write_bits(book2_cw[1] as u64, 2);
+                } else {
+                    // Silent channel: emit class=0 → codeword for book2[0] (2 bits)
+                    bw.write_bits(book2_cw[0] as u64, 2);
+                }
+            }
+
+            // VQ phase: for each channel (if class=1 → used).
+            let base = RESIDUE_BEGIN + part * PARTITION_SIZE;
+            for (ch, ch_q) in quantised.iter().take(channels).enumerate() {
+                let _ = ch;
+                // Class 1 is always "used" (we set is_used bit for pass 0 in setup).
+                // But if channel is silent, we still need to emit something;
+                // the decoder will decode it regardless.
+                for j in 0..PARTITION_SIZE {
+                    let bin = base + j;
+                    let idx = if bin < ch_q.len() { ch_q[bin] } else { 0 };
+                    // For book3 (uniform 8-bit), canonical codeword[idx] = idx.
+                    bw.write_bits(u64::from(idx), 8);
                 }
             }
         }
@@ -786,11 +1168,6 @@ fn encode_audio_packet(
 /// Encode an `AudioBuffer<f32>` as OGG Vorbis I and write the bitstream to `writer`.
 ///
 /// Uses the default quality level (q4 ≈ 0.4, ~128 kbps).
-/// For explicit quality control, use [`encode_vorbis_with_quality`].
-///
-/// Produces a valid Vorbis I stream with three header packets (identification,
-/// comment, setup) followed by MDCT audio packets.  Floor type-1 and residue
-/// type-0 scalar VQ are used to write non-zero spectral data for non-silence input.
 ///
 /// # Supported inputs
 /// - `channels`: 1 or 2
@@ -806,20 +1183,6 @@ pub fn encode_vorbis<W: Write>(buf: &AudioBuffer<f32>, writer: W) -> Result<(), 
 
 /// Encode an `AudioBuffer<f32>` as OGG Vorbis I with explicit VBR quality control.
 ///
-/// The `quality` parameter controls the trade-off between bit rate and perceptual
-/// quality via the silence threshold and residue quantization step size.
-///
-/// # Quality levels
-/// - [`VorbisQuality::from_level(-1)`][VorbisQuality::from_level]: very low quality, ~45 kbps
-/// - [`VorbisQuality::from_level(0)`][VorbisQuality::from_level]: low quality, ~64 kbps
-/// - [`VorbisQuality::from_level(4)`][VorbisQuality::from_level]: medium quality, ~128 kbps (default)
-/// - [`VorbisQuality::from_level(7)`][VorbisQuality::from_level]: high quality, ~224 kbps
-/// - [`VorbisQuality::from_level(10)`][VorbisQuality::from_level]: maximum quality, ~500 kbps
-///
-/// # Supported inputs
-/// - `channels`: 1 or 2
-/// - `sample_rate`: 44100 or 48000 Hz
-///
 /// # Errors
 ///
 /// Returns [`OxiAudioError::Encode`] if the channel count or sample rate is
@@ -832,7 +1195,6 @@ pub fn encode_vorbis_with_quality<W: Write>(
     let channels = buf.channels.channel_count();
     let sample_rate = buf.sample_rate;
 
-    // Validate inputs
     if channels == 0 || channels > 2 {
         return Err(OxiAudioError::Encode(format!(
             "Vorbis encoder supports 1 or 2 channels; got {channels}"
@@ -848,21 +1210,17 @@ pub fn encode_vorbis_with_quality<W: Write>(
 
     // ── Header pages ─────────────────────────────────────────────────────────
 
-    // Page 0: identification header (BOS page, granule=0)
     let ident = write_ident_header(channels as u8, sample_rate);
     stream.write_packet(&ident, 0, false)?;
 
-    // Page 1: comment header (granule=0)
     let comment = write_vorbis_comment_packet(VENDOR_STRING, &[], false);
     stream.write_packet(&comment, 0, false)?;
 
-    // Page 2: setup header (granule=0)
     let setup = write_setup_header(channels as u8);
     stream.write_packet(&setup, 0, false)?;
 
     // ── Audio packets ─────────────────────────────────────────────────────────
 
-    // Use hop size = blocksize_1 / 2 for granule accounting.
     let hop = (BLOCK_SIZE_1 / 2) as i64;
     let total_samples = buf.samples.len().checked_div(channels).unwrap_or(0);
 
@@ -874,13 +1232,11 @@ pub fn encode_vorbis_with_quality<W: Write>(
         let prev_long = frame_idx > 0;
         let next_long = !is_last;
 
-        // Extract interleaved samples for this frame, per channel.
         let frame_start = frame_idx * (BLOCK_SIZE_1 / 2);
         let frame_end = (frame_start + BLOCK_SIZE_1).min(total_samples);
 
         let mdct_per_channel: Vec<Vec<f32>> = (0..channels)
             .map(|ch| {
-                // Deinterleave and collect up to BLOCK_SIZE_1 samples for this channel.
                 let samples: Vec<f32> = (frame_start..frame_end)
                     .map(|i| {
                         let idx = i * channels + ch;
@@ -907,8 +1263,6 @@ pub fn encode_vorbis_with_quality<W: Write>(
 
 /// Encode an `AudioBuffer<f32>` as OGG Vorbis I and write to a file at `path`.
 ///
-/// Convenience wrapper around [`encode_vorbis`] using default quality.
-///
 /// # Errors
 ///
 /// Returns [`OxiAudioError::Io`] if the file cannot be created, or any error
@@ -920,8 +1274,6 @@ pub fn encode_vorbis_file(buf: &AudioBuffer<f32>, path: &Path) -> Result<(), Oxi
 }
 
 /// Encode an `AudioBuffer<f32>` as OGG Vorbis I with explicit quality and write to a file.
-///
-/// Convenience wrapper around [`encode_vorbis_with_quality`].
 ///
 /// # Errors
 ///
@@ -946,8 +1298,9 @@ mod tests {
     use oxiaudio_core::{AudioBuffer, ChannelLayout, OxiAudioError, SampleFormat};
 
     use super::{
-        encode_vorbis, encode_vorbis_file, encode_vorbis_quality_file, encode_vorbis_with_quality,
-        vorbis_mdct, VorbisQuality, BLOCK_SIZE_1, N_COEFFS,
+        canonical_codewords, compute_masking_threshold, encode_vorbis, encode_vorbis_file,
+        encode_vorbis_quality_file, encode_vorbis_with_quality, vorbis_mdct, VorbisQuality,
+        BLOCK_SIZE_1, N_COEFFS,
     };
 
     fn silence_buffer_mono(samples: usize) -> AudioBuffer<f32> {
@@ -982,7 +1335,42 @@ mod tests {
         }
     }
 
-    // ── New tests: MDCT and sine encoding ─────────────────────────────────────
+    // ── canonical_codewords tests ─────────────────────────────────────────────
+
+    /// For uniform lengths [2,2,2,2], canonical_codewords returns [0,1,2,3].
+    #[test]
+    fn test_canonical_codewords_uniform_4x2() {
+        let lens = vec![2u8, 2, 2, 2];
+        let cw = canonical_codewords(&lens);
+        assert_eq!(
+            cw,
+            vec![0u32, 1, 2, 3],
+            "uniform 2-bit book should yield 0,1,2,3"
+        );
+    }
+
+    /// For uniform lengths [8; 256], canonical_codewords[i] == i.
+    #[test]
+    fn test_canonical_codewords_uniform_256x8() {
+        let lens = vec![8u8; 256];
+        let cw = canonical_codewords(&lens);
+        for (i, &c) in cw.iter().enumerate() {
+            assert_eq!(
+                c, i as u32,
+                "uniform 8-bit codeword[{i}] should be {i}, got {c}"
+            );
+        }
+    }
+
+    /// Symphonia's test vector: lengths [2,4,4,4,4,2,3,3] → [0,4,5,6,7,2,6,7].
+    #[test]
+    fn test_canonical_codewords_symphonia_vector() {
+        let lens = vec![2u8, 4, 4, 4, 4, 2, 3, 3];
+        let cw = canonical_codewords(&lens);
+        assert_eq!(cw, vec![0u32, 0x4, 0x5, 0x6, 0x7, 0x2, 0x6, 0x7]);
+    }
+
+    // ── MDCT tests ────────────────────────────────────────────────────────────
 
     /// A sine wave produces non-zero MDCT energy.
     #[test]
@@ -1033,7 +1421,7 @@ mod tests {
         );
     }
 
-    // ── Existing structural tests ─────────────────────────────────────────────
+    // ── Structural tests ──────────────────────────────────────────────────────
 
     /// Verify that the OGG Vorbis output starts with the OGG capture pattern.
     #[test]
@@ -1055,7 +1443,6 @@ mod tests {
         let mut out = Cursor::new(Vec::new());
         encode_vorbis(&buf, &mut out).expect("encode_vorbis must succeed");
         let bytes = out.into_inner();
-        // The identification header "\x01vorbis" must appear somewhere in the stream.
         let magic = b"\x01vorbis";
         assert!(
             bytes.windows(magic.len()).any(|w| w == magic),
@@ -1066,8 +1453,6 @@ mod tests {
     /// Verify that > 2 channels is rejected with an Encode error.
     #[test]
     fn test_encode_vorbis_rejects_high_channel_count() {
-        // ChannelLayout::from(3u16) maps to Stereo (2-channel fallback), so we use
-        // ChannelLayout::Quad (4 channels) which is unambiguously > 2 channels.
         let buf = AudioBuffer {
             samples: vec![0.0f32; 4 * 1024],
             sample_rate: 44_100,
@@ -1116,25 +1501,18 @@ mod tests {
             bytes.starts_with(b"OggS"),
             "file must start with OGG capture pattern"
         );
-        // Cleanup
         let _ = std::fs::remove_file(&tmp);
     }
 
     /// Structural round-trip: encode succeeds and the bitstream contains valid OGG+Vorbis framing.
-    ///
-    /// Full roundtrip decode (non-empty PCM) is deferred until MDCT audio encoding
-    /// is implemented in a future milestone; the current silence scaffold produces
-    /// a structurally valid stream that some decoders may return as empty PCM.
     #[test]
     fn test_encode_vorbis_round_trip_decode() {
-        let n_samples = BLOCK_SIZE_1 * 4; // 4 long blocks
+        let n_samples = BLOCK_SIZE_1 * 4;
         let buf = silence_buffer_mono(n_samples);
         let mut out = Cursor::new(Vec::new());
         encode_vorbis(&buf, &mut out).expect("encode_vorbis must succeed for round-trip");
         let encoded = out.into_inner();
 
-        // Structural checks: correct OGG capture pattern, Vorbis identification,
-        // comment, and setup headers must all be present in the output.
         assert!(
             encoded.starts_with(b"OggS"),
             "output must start with OGG capture pattern"
@@ -1151,7 +1529,6 @@ mod tests {
             encoded.windows(7).any(|w| w == b"\x05vorbis"),
             "output must contain Vorbis setup header"
         );
-        // Verify total size is plausible (3 header pages + audio packets).
         assert!(
             encoded.len() > 100,
             "encoded output must be non-trivially large (got {} bytes)",
@@ -1218,7 +1595,7 @@ mod tests {
         );
     }
 
-    /// Higher quality must produce a lower silence threshold (encodes quieter frames).
+    /// Higher quality must produce a lower silence threshold.
     #[test]
     fn test_vorbis_silence_threshold() {
         let thresh_hi = VorbisQuality::from_level(10).silence_threshold();
@@ -1229,16 +1606,9 @@ mod tests {
         );
     }
 
-    /// Low quality produces fewer or equal bytes than high quality when encoding a
-    /// very quiet sine wave (amplitude ≈ 0.001) that falls below q=0's −40 dBFS threshold.
-    ///
-    /// The quiet sine has RMS ≈ 0.001 / sqrt(2) ≈ 7e-4.  q=0's silence threshold is
-    /// 10^(-40/20) ≈ 0.01.  So q=0 encodes these frames as silence (fewer bits), while
-    /// q=10 encodes them as active (more bits).  Hence bytes_hi > bytes_lo.
+    /// Low quality produces fewer or equal bytes than high quality for a very quiet sine.
     #[test]
     fn test_encode_vorbis_with_quality_low_vs_high() {
-        // Quiet sine: amplitude 0.001 → RMS ≈ 7.07e-4, well below q=0's threshold (~0.01)
-        // but above q=10's threshold (~1e-4).
         let n_samples = BLOCK_SIZE_1 * 8;
         let quiet_sine: Vec<f32> = (0..n_samples)
             .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44_100.0).sin() * 0.001)
@@ -1246,8 +1616,8 @@ mod tests {
         let buf = AudioBuffer {
             samples: quiet_sine,
             sample_rate: 44_100,
-            channels: oxiaudio_core::ChannelLayout::Mono,
-            format: oxiaudio_core::SampleFormat::F32,
+            channels: ChannelLayout::Mono,
+            format: SampleFormat::F32,
         };
 
         let mut out_lo = Cursor::new(Vec::new());
@@ -1332,13 +1702,12 @@ mod tests {
     /// The masking threshold must be >= ATH at every bin for any input.
     #[test]
     fn test_masking_threshold_above_ath() {
-        use super::{ath_db, compute_masking_threshold};
+        use super::ath_db;
 
         let sample_rate = 44_100u32;
         let n_bins = N_COEFFS;
         let freq_resolution = sample_rate as f32 / (2.0 * n_bins as f32);
 
-        // Use a sine-wave MDCT as a representative real signal.
         let sine: Vec<f32> = (0..BLOCK_SIZE_1)
             .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44_100.0).sin() * 0.5)
             .collect();
@@ -1357,12 +1726,9 @@ mod tests {
         }
     }
 
-    /// A 440 Hz pure tone should create elevated masking near 440 Hz vs 4000 Hz
-    /// (downward spread of masking).
+    /// A 440 Hz pure tone should create elevated masking near 440 Hz vs 4000 Hz.
     #[test]
     fn test_masking_threshold_pure_tone_creates_local_peak() {
-        use super::compute_masking_threshold;
-
         let sample_rate = 44_100u32;
         let sine: Vec<f32> = (0..BLOCK_SIZE_1)
             .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44_100.0).sin() * 0.8)
@@ -1370,20 +1736,14 @@ mod tests {
         let mdct = vorbis_mdct(&sine);
         let mask = compute_masking_threshold(&mdct, sample_rate);
 
-        // Bin for ~440 Hz: k ≈ 440 * 1024 / (44100/2) ≈ 20
         let bin_440 = (440.0 * N_COEFFS as f32 / (sample_rate as f32 / 2.0)).round() as usize;
-        // Bin for ~4000 Hz: k ≈ 4000 * 1024 / 22050 ≈ 186
         let bin_4k = (4000.0 * N_COEFFS as f32 / (sample_rate as f32 / 2.0)).round() as usize;
-
         let bin_440 = bin_440.min(N_COEFFS - 1);
         let bin_4k = bin_4k.min(N_COEFFS - 1);
 
-        // With Johnston spreading, a 440 Hz masker spreads downward ~17–20 dB/Bark.
-        // By 4 kHz (~Bark 17), the masking effect has dropped far below the local peak.
         assert!(
             mask[bin_440] > mask[bin_4k],
-            "440 Hz tone should produce higher masking threshold near 440 Hz ({}) \
-             than at 4 kHz ({})",
+            "440 Hz tone should produce higher masking threshold near 440 Hz ({}) than at 4 kHz ({})",
             mask[bin_440],
             mask[bin_4k]
         );
@@ -1393,16 +1753,14 @@ mod tests {
     /// than a loud sine wave.
     #[test]
     fn test_compute_floor_y_psychoacoustic_silence_low() {
-        use super::{compute_floor_y_psychoacoustic, compute_masking_threshold};
+        use super::compute_floor_y_psychoacoustic;
 
         let sample_rate = 44_100u32;
 
-        // Silence
         let silence_mdct = vec![0.0f32; N_COEFFS];
         let silence_mask = compute_masking_threshold(&silence_mdct, sample_rate);
         let (y_silence, _) = compute_floor_y_psychoacoustic(&silence_mdct, &silence_mask);
 
-        // Loud sine
         let loud_sine: Vec<f32> = (0..BLOCK_SIZE_1)
             .map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / 44_100.0).sin())
             .collect();
@@ -1419,7 +1777,7 @@ mod tests {
     /// Louder signal → higher Y than medium → higher Y than silence.
     #[test]
     fn test_compute_floor_y_psychoacoustic_louder_signal_higher_y() {
-        use super::{compute_floor_y_psychoacoustic, compute_masking_threshold};
+        use super::compute_floor_y_psychoacoustic;
 
         let sample_rate = 44_100u32;
 
@@ -1457,8 +1815,6 @@ mod tests {
     /// The masking threshold length must equal `mdct.len()`.
     #[test]
     fn test_masking_threshold_length_matches_mdct() {
-        use super::compute_masking_threshold;
-
         let sample_rate = 44_100u32;
         for &n in &[0usize, 1, 64, 512, N_COEFFS] {
             let mdct = vec![0.1f32; n];

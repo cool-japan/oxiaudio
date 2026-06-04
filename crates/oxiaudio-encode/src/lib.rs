@@ -14,6 +14,7 @@ pub mod opus_celt;
 pub mod opus_encoder;
 pub mod opus_hybrid;
 pub mod opus_mdct;
+pub mod opus_pvq;
 pub mod opus_range;
 pub mod opus_silk;
 pub mod vorbis;

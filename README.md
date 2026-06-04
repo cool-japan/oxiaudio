@@ -2,7 +2,7 @@
 
 Pure-Rust audio processing workspace: decode, encode, DSP effects, and spectral analysis.
 
-**Version:** 0.1.0 | **MSRV:** 1.80 | **License:** Apache-2.0
+**Version:** 0.1.1 | **MSRV:** 1.80 | **License:** Apache-2.0
 
 ## Format Support
 
@@ -97,9 +97,9 @@ oxiaudio::encode_flac(&with_reverb, Path::new("output.flac")).expect("encode fai
 
 ## Status
 
-All M0–M23 milestones complete as of 2026-06-01.
+All M0–M23 milestones complete as of 2026-06-04 (v0.1.1).
 
-- **1,079 tests passing**, 0 clippy warnings
+- **1,109 tests passing**, 0 clippy warnings
 - **41,033 production SLoC** across 6 crates (~$1.3M COCOMO estimate)
 - All major codecs, DSP algorithms, and tagging formats implemented
 - Pure Rust default features (LAME FFI is opt-in only)

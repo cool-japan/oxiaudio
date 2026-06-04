@@ -57,17 +57,17 @@ User-facing facade crate composing oxiaudio-decode, oxiaudio-encode, and oxiaudi
 - [x] Test `detect_format` on WAV, FLAC, MP3, OGG file headers (~20 SLOC)
 - [x] Test streaming decode with multiple block sizes (64, 512, 4096, 32768) produces same total output (~20 SLOC)
 - [x] Test DSP convenience functions produce same results as direct oxiaudio-dsp calls (~15 SLOC)
-- [~] Benchmark facade overhead: `decode_file` vs direct `SymphoniaDecoder.decode` to quantify abstraction cost (~10 SLOC) — benchmarks in benches/ are the appropriate venue; overhead measured there
+- [x] Benchmark facade overhead: `decode_file` vs direct `SymphoniaDecoder.decode` to quantify abstraction cost (~10 SLOC) — benchmarks in benches/ are the appropriate venue; overhead measured there
 - [x] Test `convert` utility: WAV->FLAC->WAV roundtrip preserves sample values within tolerance (~20 SLOC)
 
 ## Performance
-- [~] Profile facade function overhead (file open, BufReader/BufWriter wrapping) to ensure minimal abstraction cost (~analysis) — benchmarks in benches/ are the appropriate venue; overhead measured there
+- [x] Profile facade function overhead (file open, BufReader/BufWriter wrapping) to ensure minimal abstraction cost (~analysis) — benchmarks in benches/ are the appropriate venue; overhead measured there
 - [x] Add parallel decode support using rayon for batch processing scenarios (~20 SLOC)
 - [x] Implement lazy format detection in `convert` to avoid probing twice (~10 SLOC)
 
 ## Integration
 - [~] Integration test with oxisound: `decode_file` -> `dsp::resample` -> play via oxisound output stream (~30 SLOC example) — pending oxisound integration; oxiaudio side is ready
-- [~] Integration test: `decode_stream` -> `dsp::pitch_shift` each chunk -> `encode_stream_wav` pipeline (~25 SLOC) — pending oxisound integration; oxiaudio side is ready
+- [x] Integration test: `decode_stream` -> `dsp::pitch_shift` each chunk -> `encode_stream_wav` pipeline (~25 SLOC)
 - [x] Coordinate re-exports: ensure all new types from sub-crates (BiquadFilter, Compressor, PitchTracker, etc.) are accessible through facade (~re-export audit)
 - [x] Final FFI audit: `ffi-audit.sh` passes; `cargo deny check` passes with `mp3lame-sys` excluded from default closure (~gate check)
 - [x] CHANGELOG.md covering all milestones in Keep-a-Changelog format (~documentation)

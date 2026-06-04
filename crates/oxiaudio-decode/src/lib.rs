@@ -861,13 +861,7 @@ pub fn decode_to_i16(path: &std::path::Path) -> Result<AudioBuffer<i16>, OxiAudi
     let samples: Vec<i16> = buf
         .samples
         .iter()
-        .map(|&s| {
-            // clamp guarantees the value is in [-1.0, 1.0] before the multiply,
-            // so the cast is safe: max magnitude is 32767.0, which fits in i16.
-            #[allow(clippy::cast_possible_truncation)]
-            let v = (s.clamp(-1.0, 1.0) * 32767.0).round() as i16;
-            v
-        })
+        .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0).round() as i16)
         .collect();
     Ok(AudioBuffer {
         samples,
@@ -942,11 +936,8 @@ pub fn decode_to_i32(path: &std::path::Path) -> Result<AudioBuffer<i32>, OxiAudi
         .iter()
         .map(|&s| {
             let clamped = f64::from(s).clamp(-1.0, 1.0);
-            let scaled = (clamped * f64::from(i32::MAX)).round();
             // scaled is in [-2147483647.0, 2147483647.0] — fits in i32.
-            #[allow(clippy::cast_possible_truncation)]
-            let v = scaled as i32;
-            v
+            (clamped * f64::from(i32::MAX)).round() as i32
         })
         .collect();
     Ok(AudioBuffer {
