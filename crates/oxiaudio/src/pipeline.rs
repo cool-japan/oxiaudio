@@ -318,7 +318,8 @@ pub fn probe_metadata(path: &std::path::Path) -> Result<AudioMetadata, OxiAudioE
 /// ```no_run
 /// use std::path::Path;
 /// let inputs: Vec<&Path> = vec![Path::new("a.flac"), Path::new("b.flac")];
-/// let results = oxiaudio::transcode_batch(&inputs, Path::new("/tmp/out"), "wav");
+/// # let out_dir = std::env::temp_dir().join("out");
+/// let results = oxiaudio::transcode_batch(&inputs, &out_dir, "wav");
 /// for r in results { r.expect("transcode failed"); }
 /// ```
 pub fn transcode_batch(

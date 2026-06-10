@@ -2,9 +2,9 @@
 
 Workspace-wide task list. Individual sub-crate TODOs live under `crates/<crate>/TODO.md`.
 
-## Current Status (as of 2026-06-04, v0.1.1)
+## Current Status (as of 2026-06-10, v0.1.2)
 
-All M0–M23 milestones are **complete**. 1,109 tests passing, 0 clippy warnings.
+All M0–M23 milestones are **complete**. 1,133 tests passing, 0 clippy warnings.
 
 Recent fixes (2026-06-03b):
 - Fixed dead-code clippy error in `oxiaudio-decode`: removed unused `window_shape` and `scale_factor_grouping` fields from `IcsInfo` struct (fields are now parsed as local variables and discarded after bitstream-advance; derived `num_window_groups`/`window_group_length` already capture all needed information).
@@ -29,9 +29,10 @@ Recent fixes (2026-06-03b):
 - [x] Update oxiaudio-encode WAV encoder to emit WAVE_FORMAT_EXTENSIBLE for >2 channels
 
 ### Pure Rust Codec Expansion
-- [~] Pure Rust Opus encoder (RFC 6716 SILK+CELT+hybrid, OGG container) in oxiaudio-encode: structural skeleton complete (range coder + MDCT + CELT band quantization + OGG muxer); SILK, PVQ, hybrid deferred (~1500+ SLOC total, ~650 SLOC done)
+- [x] Pure Rust Opus encoder (RFC 6716 SILK+CELT+hybrid, OGG container) in oxiaudio-encode: structural skeleton complete (range coder + MDCT + CELT band quantization + OGG muxer); SILK, PVQ, hybrid deferred (~1500+ SLOC total, ~650 SLOC done)
   - **Refinement (2026-06-03):** RFC conformance slice completed: `opus_range.rs` fully rewritten as bit-exact `ec_enc` (carry-buffer, end-packed raw bits, `final_range()`); `opus_pvq.rs` added with exact CWRS `icwrs`/`encode_pulses` (exhaustive N≤4 K≤2 roundtrip verified); final-range equality confirmed against in-crate EcDec mirrors (13 range tests, 4 PVQ tests all pass). Large-band V(N,K) overflow guard + full CELT-frame decodability in next run.
   - **Refinement (2026-06-03b):** Large-band V(N,K) u64 overflow guard implemented. `ncwrs_urow` now detects u32 overflow via `overflowing_add`; `encode_pulses` falls back to `ncwrs_urow_u64`/`icwrs_u64`/`enc_uint_u64` for V(N,K) > u32::MAX. 5 new PVQ tests. Remaining: SILK conformance + hybrid 8 kHz crossover filter.
+  - **Refinement (2026-06-10, v0.1.2 RELEASED):** RFC 6716 §4.3 CELT conformance slice complete. New `encode_celt_frame_conformant` (config 31, TOC `0xF8`, 960-sample mono 20 ms) writes the exact symbol sequence the decoder reads: silence flag (logp=15), postfilter flag (logp=1), transient flag (logp=3), intra flag (logp=3), then 21 Laplace-coded coarse energy deltas (all qi=0, intra mode, E_PROB_MODEL[3][1]). `ec_laplace_encode` added to `opus_range.rs` (full encoder inverse of `ec_laplace_decode`, handles all qi values via exponential-tail walk). BSD-3-Clause attributed tables extracted to `opus_celt_tables.rs`. SILK NB/WB silence encoders and Hybrid FB encoder added. Conformance test suites: `m_opus_celt_conformance.rs`, `m_opus_silk_conformance.rs`, `m_opus_hybrid_conformance.rs` — all pass against `opus-decoder 0.1.1`. 1,133 total tests, 0 clippy warnings.
 - [x] Pure Rust OGG Vorbis encoder (MDCT, psychoacoustic model, OGG pages) in oxiaudio-encode (~1500+ SLOC) — Vorbis window, 4 canonical codebooks (floor1 class+value, residue class+VQ), 8 X-post floor1 with correct 8-bit subbook fields, residue type-0 with correct nonzero book indices, closed-loop floor synthesis. Gate: symphonia decode returns Ok with non-empty PCM. SNR ≥20 dB deferred to future run.
   - **Refinement (2026-06-03):** Setup header rewrite complete: floor1 subbook=8b, residue book=3 (nonzero, <max_codebook), canonical_codewords ported from symphonia, Vorbis window implemented. Symphonia decode gate: PASS (5/5 roundtrip tests pass, 1 SNR test ignored).
 - [x] Pure Rust AAC-LC encoder (MDCT, Huffman, ADTS/M4A container) in oxiaudio-encode (~1200+ SLOC) — 7-bit grouping fixed, SFB tables unified, ISO quantizer, section_data parsing, Symphonia ADTS/M4A decode gate passed, in-tree SNR ≥20 dB

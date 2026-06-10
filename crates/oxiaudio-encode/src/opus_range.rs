@@ -56,6 +56,12 @@ pub struct RangeEncoder {
     nend_bits: i32,
     /// Raw-bit bytes flushed from `end_window` (appended after `buf` on finish).
     end_buf: Vec<u8>,
+    /// Total bits logically consumed (including deferred carry bytes).
+    ///
+    /// Initialised to `EC_CODE_BITS + 1 = 33`, incremented by `EC_SYM_BITS = 8`
+    /// in each `enc_normalize` iteration.  Mirrors `nbits_total` in libopus
+    /// `celt/entenc.c` (BSD-3-Clause).
+    nbits_total: i32,
 }
 
 impl Default for RangeEncoder {
@@ -69,6 +75,7 @@ impl Default for RangeEncoder {
             end_window: 0,
             nend_bits: 0,
             end_buf: Vec::new(),
+            nbits_total: EC_CODE_BITS as i32 + 1,
         }
     }
 }
@@ -117,6 +124,7 @@ impl RangeEncoder {
             // Keep only the bottom 31 bits (below EC_CODE_TOP).
             self.val = (self.val << EC_SYM_BITS) & (EC_CODE_TOP - 1);
             self.rng <<= EC_SYM_BITS;
+            self.nbits_total += EC_SYM_BITS as i32;
         }
     }
 
@@ -238,9 +246,45 @@ impl RangeEncoder {
 
     /// Return the number of bits consumed so far (from the range-coder side).
     ///
-    /// Mirrors `ec_tell()` in `celt/entcode.c` (slightly over-estimates).
+    /// Mirrors `ec_tell()` in `celt/entcode.c`.  Uses `nbits_total` which
+    /// accumulates with each normalization byte, so this correctly tracks
+    /// the total bits logically consumed even after many bytes are emitted.
     pub fn tell(&self) -> i32 {
-        EC_CODE_BITS as i32 + 1 - ec_ilog(self.rng) as i32
+        self.nbits_total - ec_ilog(self.rng) as i32
+    }
+
+    /// Return the Q3 fractional bit count consumed by the range coder.
+    ///
+    /// Mirrors `ec_tell_frac()` in `celt/entcode.c`.  Returns a value in Q3
+    /// format (i.e., multiply by 1/8 to get bits).  Used to track the
+    /// bit budget for CELT rate allocation.
+    ///
+    /// Ported from libopus `celt/entcode.c` (BSD-3-Clause).
+    pub fn tell_frac(&self) -> u32 {
+        const CORRECTION: [u32; 8] = [35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535];
+        let nbits = (self.nbits_total as u32) << 3; // Q3
+        let l = ec_ilog(self.rng);
+        if l < 16 {
+            // Defensive: rng is effectively zero, all bits consumed.
+            return nbits;
+        }
+        let r = self.rng >> (l - 16);
+        let b_raw = (r >> 12).saturating_sub(8) as usize;
+        let b_idx = b_raw.min(7);
+        let mut b = b_idx as u32;
+        if r > CORRECTION[b_idx] {
+            b += 1;
+        }
+        let l_q3 = (l << 3) + b;
+        nbits.saturating_sub(l_q3)
+    }
+
+    /// Return the total number of bits written to the end (raw-bit) stream.
+    ///
+    /// This includes fully-flushed bytes in `end_buf` plus any remaining
+    /// bits in `end_window`.  Used to compute padding for fixed-size frames.
+    pub fn end_bits_used(&self) -> usize {
+        self.end_buf.len() * (EC_SYM_BITS as usize) + self.nend_bits.max(0) as usize
     }
 
     /// Return the final range value for conformance checking.
@@ -384,6 +428,154 @@ impl RangeEncoder {
         out.extend(self.end_buf.into_iter().rev());
         out
     }
+
+    /// Flush all state and return exactly `target` bytes, matching the
+    /// libopus fixed-buffer layout used by Opus decoders.
+    ///
+    /// Range-coded bytes fill from index 0 upward; end-packed bytes fill
+    /// from index `target-1` downward (highest address first, matching the
+    /// decoder's `read_byte_from_end()`).  Any unused middle bytes are zero.
+    ///
+    /// If the encoded content exceeds `target` (e.g., due to range-coder
+    /// termination overhead), range bytes are clamped — the last symbol may
+    /// be partially corrupted — but this is preferable to a wrong packet size
+    /// that would cause total allocation mismatch in the decoder.
+    ///
+    /// Mirrors the fixed-buffer contract of `ec_enc_done()` in libopus
+    /// `celt/entenc.c` (BSD-3-Clause).
+    pub fn finish_to_size(mut self, target: usize) -> Vec<u8> {
+        // ── Step 1: compute range-coder termination (same as finish()) ──────────
+        let mut l = EC_CODE_BITS - ec_ilog(self.rng);
+        let mut msk = (EC_CODE_TOP - 1) >> l;
+        let mut end = (self.val.wrapping_add(msk)) & !msk;
+        if (end | msk) >= self.val.wrapping_add(self.rng) {
+            l += 1;
+            msk >>= 1;
+            end = (self.val.wrapping_add(msk)) & !msk;
+        }
+        let mut l_rem = l as i32;
+        while l_rem > 0 {
+            self.carry_out((end >> (EC_CODE_BITS - EC_SYM_BITS)) as i32);
+            end = (end << EC_SYM_BITS) & (EC_CODE_TOP - 1);
+            l_rem -= EC_SYM_BITS as i32;
+        }
+        if self.rem >= 0 || self.ext > 0 {
+            self.carry_out(0);
+        }
+
+        // ── Step 2: build output buffer ─────────────────────────────────────────
+        let mut out = vec![0u8; target];
+
+        // Range bytes at the front (clamped to target).
+        let range_len = self.buf.len().min(target);
+        out[..range_len].copy_from_slice(&self.buf[..range_len]);
+
+        // End bytes at the back: end_buf[0] (first flushed) at the highest
+        // address (index target-1), matching read_byte_from_end() ordering.
+        let mut back = target;
+        for &b in &self.end_buf {
+            if back == 0 || back <= range_len {
+                break;
+            }
+            back -= 1;
+            out[back] = b;
+        }
+        // Partial end byte at the next lower address.
+        if self.nend_bits > 0 && back > range_len {
+            back -= 1;
+            out[back] = (self.end_window & EC_SYM_MAX) as u8;
+        }
+
+        out
+    }
+}
+
+// ── Laplace energy encoder ────────────────────────────────────────────────────
+//
+// Ported from libopus `celt/laplace.c` (BSD-3-Clause, Xiph.Org Foundation).
+// See `opus_celt_tables` module for the full BSD-3-Clause attribution.
+
+/// Minimum per-bucket probability mass for the Laplace model tails.
+const LAPLACE_MINP: u32 = 1;
+/// Number of minimum-probability tail buckets.
+const LAPLACE_NMIN: u32 = 16;
+
+/// Compute frequency mass of the first non-zero bucket (mirrors `laplace_get_freq1`).
+///
+/// `fs0` is the zero-symbol frequency mass; `decay` is the exponential decay
+/// parameter (both from the `E_PROB_MODEL` table via appropriate shifts).
+fn laplace_get_freq1(fs0: u32, decay: u32) -> u32 {
+    let ft = 32_768u32
+        .saturating_sub(LAPLACE_MINP * (2 * LAPLACE_NMIN))
+        .saturating_sub(fs0);
+    ((ft as u64 * (16_384u32.saturating_sub(decay)) as u64) >> 15) as u32
+}
+
+/// Compute the range-coder interval `(fl, fh)` for encoding a Laplace delta `qi`.
+///
+/// Mirrors the inverse of `ec_laplace_decode` from libopus `celt/laplace.c`.
+/// The interval is in `[0, 32768)` (ft = 2^15).
+///
+/// - `qi = 0`:  centre peak — interval `[0, fs0)`.
+/// - `qi ≠ 0`:  walks the exponential tails to locate the correct bucket pair.
+fn laplace_sym_bounds(qi: i32, fs0: u32, decay: u32) -> (u32, u32) {
+    if qi == 0 {
+        return (0, fs0.min(32_768));
+    }
+
+    let neg = qi < 0;
+    let mag = qi.unsigned_abs();
+
+    let mut fl: u32 = fs0;
+    let mut fs_cur = laplace_get_freq1(fs0, decay) + LAPLACE_MINP;
+
+    // Advance mag-1 steps to reach the target magnitude bucket.
+    // Mirrors the while loop inside `ec_laplace_decode` in libopus.
+    let mut step = 1u32;
+    while step < mag {
+        if fs_cur <= LAPLACE_MINP {
+            // Minimum-probability tail: each remaining slot is LAPLACE_MINP wide.
+            let remaining = mag - step;
+            fl = fl.saturating_add(2 * remaining * LAPLACE_MINP);
+            fs_cur = LAPLACE_MINP;
+            break;
+        }
+        // Mirror decoder body: fs_cur *= 2; fl += fs_cur; fs_cur = decay(fs_cur)
+        fs_cur = fs_cur.saturating_mul(2);
+        fl = fl.saturating_add(fs_cur);
+        fs_cur = ((fs_cur.saturating_sub(2 * LAPLACE_MINP) as u64 * decay as u64) >> 15) as u32
+            + LAPLACE_MINP;
+        step += 1;
+    }
+
+    // Within the target magnitude bucket:
+    // negative side: [fl, fl+fs_cur),  positive side: [fl+fs_cur, fl+2*fs_cur)
+    if neg {
+        let fh = fl.saturating_add(fs_cur).min(32_768);
+        (fl, fh)
+    } else {
+        let new_fl = fl.saturating_add(fs_cur);
+        let fh = fl.saturating_add(fs_cur.saturating_mul(2)).min(32_768);
+        (new_fl, fh)
+    }
+}
+
+/// Encode a Laplace-distributed coarse energy delta into the range coder.
+///
+/// This is the encoder inverse of `ec_laplace_decode` from libopus
+/// `celt/laplace.c` (BSD-3-Clause).  The parameters `fs` and `decay` are
+/// derived from `E_PROB_MODEL` by the caller as:
+///
+/// ```text
+/// fs    = (E_PROB_MODEL[lm][intra][2*i])   as u32 << 7
+/// decay = (E_PROB_MODEL[lm][intra][2*i+1]) as u32 << 6
+/// ```
+///
+/// `qi` is the signed energy delta to encode.
+pub fn ec_laplace_encode(enc: &mut RangeEncoder, qi: i32, fs: u32, decay: u32) {
+    let (fl, fh) = laplace_sym_bounds(qi, fs, decay);
+    // ft = 32768 = 2^15; use encode_bin for the power-of-two fast path.
+    enc.encode_bin(fl, fh, 15);
 }
 
 // ── Internal utilities ────────────────────────────────────────────────────────

@@ -592,8 +592,13 @@ fn decode_sf_huffman(br: &mut BitReader<'_>) -> Result<i32, OxiAudioError> {
 /// The scale factor accumulates: sf[n] = sf[n-1] + delta.
 /// The first non-zero SFB's SF = global_gain + delta_0.
 ///
-/// Returns a Vec indexed by SFB (length = max_sfb), with each element
-/// being the absolute scale factor for that SFB (or `global_gain` for zero SFBs).
+/// For long windows, the returned Vec has length `max_sfb`.
+/// For short windows (num_window_groups > 1), sections carry flat indices
+/// `group * max_sfb + sfb_local`, so the buffer is sized
+/// `num_window_groups * max_sfb` to accommodate all groups.
+///
+/// Returns a Vec indexed by flat SFB index with each element being the
+/// absolute scale factor for that SFB (or `global_gain` for zero SFBs).
 ///
 /// # Errors
 ///
@@ -603,8 +608,10 @@ fn decode_scale_factors(
     max_sfb: usize,
     global_gain: u8,
     sections: &[Section],
+    num_window_groups: usize,
 ) -> Result<Vec<i16>, OxiAudioError> {
-    let mut sfs = vec![i32::from(global_gain); max_sfb];
+    let total_sfbs = num_window_groups * max_sfb;
+    let mut sfs = vec![i32::from(global_gain); total_sfbs];
     let mut prev = i32::from(global_gain);
 
     for sect in sections {
@@ -615,15 +622,15 @@ fn decode_scale_factors(
         }
         // Non-zero codebooks: read one delta per SFB in this section.
         // Split into in-range SFBs (written to sfs) and out-of-range SFBs (delta consumed only).
-        let end = sect.sfb_end.min(max_sfb);
-        let start = sect.sfb_start.min(max_sfb);
+        let end = sect.sfb_end.min(total_sfbs);
+        let start = sect.sfb_start.min(total_sfbs);
         for slot in &mut sfs[start..end] {
             let delta = decode_sf_huffman(br)?;
             prev += delta;
             // Clamp to sane range
             *slot = prev.clamp(-200, 255);
         }
-        // If sfb_end > max_sfb, still consume and accumulate the remaining deltas
+        // If sfb_end > total_sfbs, still consume and accumulate the remaining deltas
         for _ in end..sect.sfb_end {
             prev += decode_sf_huffman(br)?;
         }
@@ -717,51 +724,98 @@ struct Section {
 
 /// Parse section_data() from the bitstream.
 ///
-/// Long window: sect_bits=5, escape=31.
-/// Short window: sect_bits=3, escape=7 (not implemented here — long only).
+/// Long window: sect_bits=5, escape=31, one pass over all max_sfb SFBs.
+/// Short window: sect_bits=3, escape=7, one pass per window group; sections
+/// are emitted with sfb_start/sfb_end offset by `group * max_sfb` so that
+/// callers can index a flat `num_window_groups * max_sfb` scale-factor array.
 ///
-/// Returns a Vec of sections covering all `max_sfb` SFBs.
+/// Returns a flattened Vec of sections across all groups.
 fn decode_section_data(
     br: &mut BitReader<'_>,
     max_sfb: usize,
-    _eight_short: bool,
+    eight_short: bool,
+    ics: &IcsInfo,
 ) -> Result<Vec<Section>, OxiAudioError> {
-    // Long window: 5-bit section length increments, escape = 31.
-    let sect_bits: u8 = 5;
-    let sect_esc: usize = 31;
+    if eight_short {
+        // Short window: sect_bits=3, sect_esc=7 (ISO 14496-3 §4.6.8.2.3)
+        let sect_bits: u8 = 3;
+        let sect_esc: usize = 7;
+        let num_groups = ics.num_window_groups;
 
-    let mut sections = Vec::new();
-    let mut sfb = 0usize;
+        let mut sections = Vec::new();
 
-    while sfb < max_sfb {
-        let cb = br.read_bits(4)? as u8;
-        // Read section length in SFBs using escape coding
-        let mut sect_len = 0usize;
-        loop {
-            let incr = br.read_bits(sect_bits)? as usize;
-            sect_len += incr;
-            if incr < sect_esc {
+        for g in 0..num_groups {
+            let group_sfb_base = g * max_sfb;
+            let mut sfb = 0usize;
+
+            while sfb < max_sfb {
+                let cb = br.read_bits(4)? as u8;
+                // Read section length in SFBs using escape coding
+                let mut sect_len = 0usize;
+                loop {
+                    let incr = br.read_bits(sect_bits)? as usize;
+                    sect_len += incr;
+                    if incr < sect_esc {
+                        break;
+                    }
+                }
+                if sect_len == 0 {
+                    return Err(OxiAudioError::Decode(
+                        "AAC: short-window section_data has zero-length section".into(),
+                    ));
+                }
+                let sfb_end_local = (sfb + sect_len).min(max_sfb);
+                sections.push(Section {
+                    cb,
+                    sfb_start: group_sfb_base + sfb,
+                    sfb_end: group_sfb_base + sfb_end_local,
+                });
+                sfb += sect_len;
+                if sfb >= max_sfb {
+                    break;
+                }
+            }
+        }
+
+        Ok(sections)
+    } else {
+        // Long window: 5-bit section length increments, escape = 31.
+        let sect_bits: u8 = 5;
+        let sect_esc: usize = 31;
+
+        let mut sections = Vec::new();
+        let mut sfb = 0usize;
+
+        while sfb < max_sfb {
+            let cb = br.read_bits(4)? as u8;
+            // Read section length in SFBs using escape coding
+            let mut sect_len = 0usize;
+            loop {
+                let incr = br.read_bits(sect_bits)? as usize;
+                sect_len += incr;
+                if incr < sect_esc {
+                    break;
+                }
+            }
+            if sect_len == 0 {
+                return Err(OxiAudioError::Decode(
+                    "AAC: section_data has zero-length section".into(),
+                ));
+            }
+            let sfb_end = (sfb + sect_len).min(max_sfb);
+            sections.push(Section {
+                cb,
+                sfb_start: sfb,
+                sfb_end,
+            });
+            sfb += sect_len;
+            if sfb >= max_sfb {
                 break;
             }
         }
-        if sect_len == 0 {
-            return Err(OxiAudioError::Decode(
-                "AAC: section_data has zero-length section".into(),
-            ));
-        }
-        let sfb_end = (sfb + sect_len).min(max_sfb);
-        sections.push(Section {
-            cb,
-            sfb_start: sfb,
-            sfb_end,
-        });
-        sfb += sect_len;
-        if sfb >= max_sfb {
-            break;
-        }
-    }
 
-    Ok(sections)
+        Ok(sections)
+    }
 }
 
 /// Decode a CB11 escape value magnitude >= 16.
@@ -1087,11 +1141,12 @@ fn decode_ics_data(
 
     // section_data(): parse section codebooks and lengths
     let eight_short = ics.window_sequence == 2;
-    let sections = decode_section_data(br, max_sfb, eight_short)?;
+    let sections = decode_section_data(br, max_sfb, eight_short, &ics)?;
 
-    // scale_factor_data(): read SF deltas only for non-ZERO_HCB SFBs
+    // scale_factor_data(): read SF deltas only for non-ZERO_HCB SFBs.
+    // Short windows need num_window_groups * max_sfb slots; long windows need max_sfb.
     let sfb_offsets = sfb_offsets_long(sample_rate);
-    let sfs = decode_scale_factors(br, max_sfb, global_gain, &sections)?;
+    let sfs = decode_scale_factors(br, max_sfb, global_gain, &sections, ics.num_window_groups)?;
 
     // pulse_data_present
     let pulse_data_present = br.read_bool()?;
@@ -1668,5 +1723,202 @@ mod tests {
         let mut br = BitReader::new(&data);
         let v = decode_escape_value(&mut br, 5).expect("escape value below 16");
         assert!((v - 5.0).abs() < 1e-5);
+    }
+
+    // ── Short-window section_data tests ────────────────────────────────────────
+
+    /// Build a bit-packed buffer for section_data in short-window mode.
+    ///
+    /// Each call to `push_section` appends: 4-bit cb + 3-bit length (no escape).
+    /// Bits are packed MSB-first into a Vec<u8>.
+    struct BitWriter {
+        buf: Vec<u8>,
+        bit: u8, // current bit position (7 = MSB)
+        cur: u8,
+    }
+
+    impl BitWriter {
+        fn new() -> Self {
+            Self {
+                buf: Vec::new(),
+                bit: 7,
+                cur: 0,
+            }
+        }
+
+        fn write_bits(&mut self, val: u32, n: u8) {
+            for i in (0..n).rev() {
+                let b = ((val >> i) & 1) as u8;
+                self.cur |= b << self.bit;
+                if self.bit == 0 {
+                    self.buf.push(self.cur);
+                    self.cur = 0;
+                    self.bit = 7;
+                } else {
+                    self.bit -= 1;
+                }
+            }
+        }
+
+        fn finish(mut self) -> Vec<u8> {
+            if self.bit != 7 {
+                self.buf.push(self.cur);
+            }
+            self.buf
+        }
+    }
+
+    /// Encode one short-window section: 4-bit cb + 3-bit length (must be < 7 to avoid escape).
+    fn encode_short_section(bw: &mut BitWriter, cb: u8, len: u8) {
+        bw.write_bits(u32::from(cb), 4);
+        bw.write_bits(u32::from(len), 3);
+    }
+
+    /// Encode one long-window section: 4-bit cb + 5-bit length (must be < 31).
+    fn encode_long_section(bw: &mut BitWriter, cb: u8, len: u8) {
+        bw.write_bits(u32::from(cb), 4);
+        bw.write_bits(u32::from(len), 5);
+    }
+
+    #[test]
+    fn test_decode_section_data_short_window_sect_bits() {
+        // Construct a minimal IcsInfo for EIGHT_SHORT with 1 group covering max_sfb=4.
+        let ics = IcsInfo {
+            window_sequence: 2,
+            max_sfb: 4,
+            num_windows: 8,
+            num_window_groups: 1,
+            window_group_length: [8, 0, 0, 0, 0, 0, 0, 0],
+        };
+        let max_sfb = 4usize;
+
+        // Build a single group with one section cb=11 covering all 4 SFBs.
+        // Short mode: 4-bit cb + 3-bit length=4.
+        let mut bw = BitWriter::new();
+        encode_short_section(&mut bw, 11, 4);
+        let data = bw.finish();
+
+        let mut br = BitReader::new(&data);
+        let sections =
+            decode_section_data(&mut br, max_sfb, true, &ics).expect("short section decode");
+
+        assert_eq!(sections.len(), 1, "should have exactly 1 section");
+        let s = &sections[0];
+        assert_eq!(s.cb, 11);
+        assert_eq!(s.sfb_start, 0);
+        assert_eq!(s.sfb_end, 4);
+    }
+
+    #[test]
+    fn test_decode_section_data_short_window_multi_group() {
+        // Two groups, max_sfb=3. Each group emits 1 section covering all 3 SFBs.
+        let ics = IcsInfo {
+            window_sequence: 2,
+            max_sfb: 3,
+            num_windows: 8,
+            num_window_groups: 2,
+            window_group_length: [4, 4, 0, 0, 0, 0, 0, 0],
+        };
+        let max_sfb = 3usize;
+
+        let mut bw = BitWriter::new();
+        // Group 0: cb=0 (ZERO_HCB), length=3
+        encode_short_section(&mut bw, 0, 3);
+        // Group 1: cb=11, length=3
+        encode_short_section(&mut bw, 11, 3);
+        let data = bw.finish();
+
+        let mut br = BitReader::new(&data);
+        let sections =
+            decode_section_data(&mut br, max_sfb, true, &ics).expect("multi-group short decode");
+
+        assert_eq!(sections.len(), 2);
+        // Group 0 section: flat indices 0..3
+        assert_eq!(sections[0].cb, 0);
+        assert_eq!(sections[0].sfb_start, 0);
+        assert_eq!(sections[0].sfb_end, 3);
+        // Group 1 section: flat indices 3..6 (group_base=1*3=3)
+        assert_eq!(sections[1].cb, 11);
+        assert_eq!(sections[1].sfb_start, 3);
+        assert_eq!(sections[1].sfb_end, 6);
+    }
+
+    #[test]
+    fn test_decode_section_data_long_window_uses_5bit() {
+        // Long window: verify sect_bits=5 by sending a length of 20 (which would
+        // overflow a 3-bit field but fits in 5 bits).
+        let ics = IcsInfo {
+            window_sequence: 0,
+            max_sfb: 20,
+            num_windows: 1,
+            num_window_groups: 1,
+            window_group_length: [1, 0, 0, 0, 0, 0, 0, 0],
+        };
+        let max_sfb = 20usize;
+
+        let mut bw = BitWriter::new();
+        encode_long_section(&mut bw, 5, 20); // cb=5, length=20
+        let data = bw.finish();
+
+        let mut br = BitReader::new(&data);
+        let sections =
+            decode_section_data(&mut br, max_sfb, false, &ics).expect("long section decode");
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].cb, 5);
+        assert_eq!(sections[0].sfb_start, 0);
+        assert_eq!(sections[0].sfb_end, 20);
+    }
+
+    #[test]
+    fn test_scale_factors_short_window_buffer_size() {
+        // Verify that decode_scale_factors allocates num_window_groups * max_sfb entries
+        // for short windows. We use 2 groups, max_sfb=3 → expect 6 entries.
+        //
+        // Build sections and a trivial SF bitstream: all deltas = 0 (1-bit codeword '1').
+        let sections = vec![
+            Section {
+                cb: 11,
+                sfb_start: 0,
+                sfb_end: 3,
+            }, // group 0
+            Section {
+                cb: 11,
+                sfb_start: 3,
+                sfb_end: 6,
+            }, // group 1
+        ];
+
+        // 6 SFBs × delta=0 → 6 one-bit '1' codewords = 0b11111100 (padded)
+        let data = [0b1111_1100u8];
+        let mut br = BitReader::new(&data);
+
+        let sfs =
+            decode_scale_factors(&mut br, 3, 100, &sections, 2).expect("short-window SF decode");
+
+        assert_eq!(sfs.len(), 6, "should have 2*3=6 SF entries for 2 groups");
+        for &sf in &sfs {
+            // delta=0 → all equal global_gain=100
+            assert_eq!(sf, 100, "all SFs should equal global_gain when delta=0");
+        }
+    }
+
+    #[test]
+    fn test_scale_factors_long_window_buffer_size() {
+        // Long window: num_window_groups=1, max_sfb=4 → expect 4 entries.
+        let sections = vec![Section {
+            cb: 11,
+            sfb_start: 0,
+            sfb_end: 4,
+        }];
+
+        // 4 SFBs × delta=0 → 4 one-bit '1' codewords
+        let data = [0b1111_0000u8];
+        let mut br = BitReader::new(&data);
+
+        let sfs =
+            decode_scale_factors(&mut br, 4, 100, &sections, 1).expect("long-window SF decode");
+
+        assert_eq!(sfs.len(), 4, "should have 1*4=4 SF entries for long window");
     }
 }

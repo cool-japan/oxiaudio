@@ -27,6 +27,7 @@ oxiaudio-core = { workspace = true }
 oxiaudio-decode = { path = "../oxiaudio-decode" }
 oxiaudio-dsp = { path = "../oxiaudio-dsp" }
 criterion = { workspace = true }
+opus-decoder = { workspace = true }
 
 [[bench]]
 name = "encode_bench"

@@ -5,6 +5,65 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-06-10
+
+### Added
+- **SILK NB encoder** (`oxiaudio-encode`, `opus_silk_conform`): RFC 6716–conformant
+  pure-Rust SILK narrowband (8 kHz) encoder producing decodable Opus packets.
+  Exposes `encode_silk_frame_conformant(pcm) -> Vec<u8>` (TOC `0x08`, config 1 = SILK-only
+  NB 20 ms mono). Encodes iCDF tables for signal type, gain, delta-gain, NLSF stage-1/2
+  (NB and WB codebooks), interpolation factor, excitation seed, pulse rate-level,
+  and pulses-per-block; zero-excitation (silence) path verified against `opus-decoder 0.1.1`.
+- **SILK WB encoder** (`oxiaudio-encode`, `opus_silk_conform`): RFC 6716–conformant
+  wideband (16 kHz) SILK layer encoder; exposes internal `encode_silk_wb_silence_into`
+  for use by the hybrid encoder path. Uses WB NLSF codebook (order=16, 20 shell blocks,
+  320-sample frame).
+- **CELT conformant encoder** (`oxiaudio-encode`, `opus_celt`): complete RFC 6716
+  §4.3 CELT-only conformance slice.  `encode_celt_frame_conformant` (config 31,
+  TOC `0xF8`, 960-sample mono 20 ms) writes the exact symbol sequence the decoder
+  reads: silence flag (logp=15), postfilter flag (logp=1), transient/intra flags,
+  21 Laplace-coded coarse energy deltas (intra mode, `E_PROB_MODEL[3][1]`),
+  TF/spread/dynalloc/trim headers, `clt_compute_allocation`-based rate allocation,
+  fine energy (zeros), and PVQ CWRS shapes per band.
+- **Hybrid FB encoder** (`oxiaudio-encode`, `opus_hybrid_conform`): RFC 6716
+  hybrid mode (config 15, TOC `0x78`, Hybrid Fullband 20 ms mono) encoder combining
+  a SILK WB silence layer and a CELT high-band layer (bands 17–20, `start_band=17`)
+  in a single shared range-coder stream.
+- **`ec_laplace_encode`** (`opus_range.rs`): full encoder inverse of `ec_laplace_decode`;
+  handles all `qi` values via exponential-tail walk; used for Laplace-coded coarse
+  energy quantization in CELT.
+- **`celt_mdct_960`** (`opus_mdct.rs`): 960-sample MDCT analysis via OxiFFT for
+  CELT frame energy and PVQ shape computation.
+- **CELT BSD-3-Clause tables** (`opus_celt_tables.rs`): rate-allocation constants
+  extracted to a dedicated module — `EBAND_5MS`, `LOG_N_400`, `ALLOC_TRIM_COEFS`,
+  `ALLOC_TABLE_CELT`, `CACHE_BITS_50`, `CACHE_INDEX_50`; attributed to Xiph.Org Foundation.
+- **Conformance test suites**: `m_opus_celt_conformance.rs`, `m_opus_hybrid_conformance.rs`,
+  `m_opus_silk_conformance.rs` (3 × ~130 lines each) in `oxiaudio-encode`, verifying
+  TOC bytes and decodability against `opus-decoder 0.1.1`.
+- **AAC decoder short-window `section_data`** (`oxiaudio-decode`): `decode_section_data`
+  now handles `EIGHT_SHORT_SEQUENCE` windows; reads 8 groups × up to `max_sfb` sections
+  with `sect_bits=3` / `sect_esc=7` (ISO 14496-3 §4.6.8.2.3); sections are offset by
+  `group * max_sfb` so callers can index a flat `num_window_groups * max_sfb` scale-factor
+  array.
+- **AAC decoder short-window scale-factor array** (`oxiaudio-decode`): `decode_scale_factors`
+  now allocates `num_window_groups * max_sfb` entries for short-window frames, eliminating
+  out-of-bounds indexing on grouped short windows.
+
+### Changed
+- `encode_celt_body_into` refactored to a shared inner function used by both
+  CELT-only (`start_band=0`, silence flag written) and hybrid (`start_band=17`, silence
+  flag omitted) paths, eliminating code duplication between the two modes.
+- `transcode_batch` example updated to use `std::env::temp_dir()` for output paths
+  (no more hardcoded absolute paths).
+
+### Fixed
+- **AAC decoder `decode_section_data` long-window zero-length guard** (`oxiaudio-decode`):
+  the error message now reads `"AAC: section_data has zero-length section"` consistently
+  for both long-window and short-window paths.
+- **Rustdoc broken intra-doc links** (`opus_celt_tables.rs`, `opus_hybrid_conform.rs`):
+  fixed `entry[0]` bracket escape and removed private-item cross-links that caused
+  `RUSTDOCFLAGS="-D warnings"` build failures.
+
 ## [0.1.1] - 2026-06-04
 
 ### Added
@@ -254,4 +313,5 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - `AudioPipeline` parallel branch nodes with per-node bypass/mute and latency reporting
 - Optional `serde` feature: JSON-serializable core types (AudioBuffer, AudioFormat, AudioMetadata, ChannelLayout, SampleFormat)
 
+[0.1.2]: https://github.com/cool-japan/oxiaudio/releases/tag/v0.1.2
 [0.1.1]: https://github.com/cool-japan/oxiaudio/releases/tag/v0.1.1

@@ -11,12 +11,15 @@ mod flac_streaming;
 mod id3;
 pub mod ogg;
 pub mod opus_celt;
+pub mod opus_celt_tables;
 pub mod opus_encoder;
 pub mod opus_hybrid;
+pub mod opus_hybrid_conform;
 pub mod opus_mdct;
 pub mod opus_pvq;
 pub mod opus_range;
 pub mod opus_silk;
+pub mod opus_silk_conform;
 pub mod vorbis;
 mod wav_cue;
 mod wav_ext;
@@ -44,9 +47,12 @@ pub use flac_picture::{
 pub use flac_streaming::FlacStreamingEncoder;
 pub use id3::Id3v24Tag;
 pub use ogg::{ogg_crc32, write_ogg_page, write_vorbis_comment_packet, OggStream};
+pub use opus_celt::encode_celt_frame_conformant;
 pub use opus_encoder::{encode_opus, encode_opus_file, OpusEncodeConfig, OpusStreamEncoder};
 pub use opus_hybrid::{encode_hybrid_frame, hybrid_toc, should_use_hybrid};
+pub use opus_hybrid_conform::encode_hybrid_frame_conformant;
 pub use opus_silk::{analyze_silk_frame, encode_silk_frame, SilkBandwidth, SilkLpcFrame};
+pub use opus_silk_conform::encode_silk_frame_conformant;
 pub use vorbis::{
     encode_vorbis, encode_vorbis_file, encode_vorbis_quality_file, encode_vorbis_with_quality,
     VorbisQuality,
