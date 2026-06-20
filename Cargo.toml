@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 rust-version = "1.80"
 authors = ["COOLJAPAN OU (Team Kitasan)"]
@@ -20,11 +20,11 @@ description = "OxiAudio is the COOLJAPAN Pure-Rust audio codec + DSP layer."
 
 [workspace.dependencies]
 # workspace internal
-oxiaudio-core            = { path = "crates/oxiaudio-core",            version = "0.1.3" }
-oxiaudio-decode          = { path = "crates/oxiaudio-decode",          version = "0.1.3" }
-oxiaudio-encode          = { path = "crates/oxiaudio-encode",          version = "0.1.3" }
-oxiaudio-encode-mp3-lame = { path = "crates/oxiaudio-encode-mp3-lame", version = "0.1.3" }
-oxiaudio-dsp             = { path = "crates/oxiaudio-dsp",             version = "0.1.3" }
+oxiaudio-core            = { path = "crates/oxiaudio-core",            version = "0.1.4" }
+oxiaudio-decode          = { path = "crates/oxiaudio-decode",          version = "0.1.4" }
+oxiaudio-encode          = { path = "crates/oxiaudio-encode",          version = "0.1.4" }
+oxiaudio-encode-mp3-lame = { path = "crates/oxiaudio-encode-mp3-lame", version = "0.1.4" }
+oxiaudio-dsp             = { path = "crates/oxiaudio-dsp",             version = "0.1.4" }
 # external — Pure Rust
 thiserror = { version = "2.0.18" }
 serde      = { version = "1.0.228", default-features = false, features = ["derive", "alloc"] }
