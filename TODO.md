@@ -2,7 +2,7 @@
 
 Workspace-wide task list. Individual sub-crate TODOs live under `crates/<crate>/TODO.md`.
 
-## Current Status (as of 2026-06-10, v0.1.2)
+## Current Status (as of 2026-06-10, v0.1.3 (work in progress))
 
 All M0–M23 milestones are **complete**. 1,133 tests passing, 0 clippy warnings.
 

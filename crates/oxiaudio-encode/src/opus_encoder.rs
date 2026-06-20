@@ -27,7 +27,10 @@ use std::io::Write;
 
 use crate::ogg::{write_vorbis_comment_packet, OggStream};
 use crate::opus_celt::encode_celt_frame;
+use crate::opus_celt::encode_celt_frame_conformant;
+use crate::opus_hybrid_conform::encode_hybrid_frame_conformant;
 use crate::opus_range::RangeEncoder;
+use crate::opus_silk_conform::encode_silk_frame_conformant;
 use oxiaudio_core::{AudioBuffer, OxiAudioError};
 
 /// Fixed sample rate expected by the Opus encoder (48 kHz).
@@ -169,6 +172,132 @@ pub fn encode_opus_file(
     encode_opus(buf, writer, target_bitrate_kbps)
 }
 
+/// Selects which RFC 6716–conformant per-frame encoder [`encode_opus_conformant`] uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpusConformantMode {
+    /// CELT-only fullband 20 ms frames (TOC 0xF8). Carries real spectral content
+    /// (MDCT + PVQ); the conformance suite verifies decoded output correlates
+    /// (>0.1) with a 440 Hz input tone. This is the default — it is the only
+    /// conformant mode that encodes actual signal rather than silence.
+    Celt,
+    /// SILK-only narrowband 20 ms frames (TOC 0x08). NOTE: the current conformant
+    /// SILK writer emits an inactive zero-excitation (silence) frame — the PCM
+    /// content is NOT encoded. Decodes cleanly but reconstructs silence.
+    Silk,
+    /// Hybrid fullband 20 ms frames (TOC 0x78): SILK WB silence + CELT high-band.
+    /// Decodes cleanly to 960 samples; low band is silence, high band carries
+    /// CELT content for bands 17–20 only.
+    Hybrid,
+}
+
+/// Encode an [`AudioBuffer<f32>`] to OGG Opus using RFC 6716–conformant per-frame
+/// encoders, writing to `writer`. This is an opt-in alternative to [`encode_opus`].
+///
+/// Unlike [`encode_opus`] (which emits a non-conformant 4-bit placeholder CELT
+/// payload that standard decoders reject), this routes each 20 ms frame through a
+/// conformant SILK / CELT / Hybrid writer, producing a structurally valid OGG Opus
+/// stream that standard Opus decoders accept (verified per-frame against the
+/// `opus-decoder` crate).
+///
+/// # Conformance level (be precise — this is NOT transparent encoding)
+/// - [`OpusConformantMode::Celt`] (default quality): full MDCT + PVQ; decoded
+///   output correlates (>0.1) with the input tone — real spectral content, but
+///   this is only a coarse "not-silence" gate, **not** high-SNR transparency.
+/// - [`OpusConformantMode::Silk`]: **silence-only** — the conformant SILK writer
+///   currently emits an inactive zero-excitation frame and ignores the PCM.
+/// - [`OpusConformantMode::Hybrid`]: low band is silence; high band carries CELT
+///   content for bands 17–20 only.
+///
+/// All frames are mono. Stereo input is downmixed to mono per frame by averaging
+/// L/R. The OGG `OpusHead` still advertises the input channel count (1 or 2),
+/// matching [`encode_opus`]'s behaviour — document/expect this asymmetry.
+///
+/// [`encode_opus`] and its exact byte output are completely unaffected by this
+/// function; both share only the immutable `OpusHead`/`OpusTags`/OGG framing path.
+///
+/// # Errors
+/// Returns [`OxiAudioError::UnsupportedFormat`] when channels are outside 1..=2 or
+/// the sample rate is not 48 kHz; [`OxiAudioError::Io`] on write failure.
+pub fn encode_opus_conformant<W: Write>(
+    buf: &AudioBuffer<f32>,
+    writer: W,
+    mode: OpusConformantMode,
+) -> Result<(), OxiAudioError> {
+    let channels = buf.channels.channel_count();
+
+    if channels == 0 || channels > 2 {
+        return Err(OxiAudioError::UnsupportedFormat(format!(
+            "Opus encoder supports 1–2 channels, got {channels}"
+        )));
+    }
+    if buf.sample_rate != OPUS_SAMPLE_RATE {
+        return Err(OxiAudioError::UnsupportedFormat(format!(
+            "Opus encoder requires 48 kHz input, got {} Hz",
+            buf.sample_rate
+        )));
+    }
+
+    let serial: u32 = 0x1234_5678;
+    let mut stream = OggStream::new(writer, serial);
+
+    let head = write_opus_head(channels as u8, PRE_SKIP, buf.sample_rate);
+    stream.write_packet(&head, 0, false)?;
+
+    let tags = write_vorbis_comment_packet("OxiAudio 0.1.0", &[], true);
+    stream.write_packet(&tags, 0, false)?;
+
+    let frame_samples = FRAME_SIZE * channels;
+    let n_frames = buf.samples.len().checked_div(frame_samples).unwrap_or(0);
+
+    for i in 0..n_frames {
+        let start = i * frame_samples;
+        let end = start + frame_samples;
+        let pcm = &buf.samples[start..end];
+
+        // Downmix to mono once; keep the owned buffer alive for the borrow below.
+        let mono_vec: Vec<f32> = if channels == 2 {
+            pcm.chunks_exact(2).map(|c| 0.5 * (c[0] + c[1])).collect()
+        } else {
+            pcm.to_vec()
+        };
+        let mono: &[f32] = &mono_vec;
+
+        let packet = match mode {
+            OpusConformantMode::Celt => encode_celt_frame_conformant(mono, 1),
+            OpusConformantMode::Silk => encode_silk_frame_conformant(mono, 1),
+            OpusConformantMode::Hybrid => encode_hybrid_frame_conformant(mono, 1),
+        };
+
+        let is_last = i == n_frames - 1;
+        stream.write_packet(&packet, FRAME_SIZE as i64, is_last)?;
+    }
+
+    stream
+        .finish()
+        .map_err(|_| OxiAudioError::Io(std::io::Error::other("OGG stream finish failed")))?;
+
+    Ok(())
+}
+
+/// Encode an [`AudioBuffer<f32>`] to a conformant OGG Opus file at `path`.
+///
+/// File-writing convenience wrapper around [`encode_opus_conformant`]; see that
+/// function for the per-mode conformance caveats (SILK is silence-only, CELT is
+/// coarse-gated rather than transparent).
+///
+/// # Errors
+/// Returns [`OxiAudioError::Io`] on file-creation or write failure; propagates the
+/// validation errors of [`encode_opus_conformant`].
+pub fn encode_opus_conformant_file(
+    buf: &AudioBuffer<f32>,
+    path: &std::path::Path,
+    mode: OpusConformantMode,
+) -> Result<(), OxiAudioError> {
+    let file = std::fs::File::create(path).map_err(OxiAudioError::Io)?;
+    let writer = std::io::BufWriter::new(file);
+    encode_opus_conformant(buf, writer, mode)
+}
+
 /// Configuration for Opus encoding.
 #[derive(Debug, Clone)]
 pub struct OpusEncodeConfig {
@@ -301,7 +430,10 @@ mod tests {
 
     use oxiaudio_core::{AudioBuffer, ChannelLayout, SampleFormat};
 
-    use super::{encode_opus, OpusEncodeConfig, OpusStreamEncoder, FRAME_SIZE};
+    use super::{
+        encode_opus, encode_opus_conformant, OpusConformantMode, OpusEncodeConfig,
+        OpusStreamEncoder, FRAME_SIZE,
+    };
 
     fn silence_buf(channels: usize, frames: usize) -> AudioBuffer<f32> {
         let layout = if channels == 1 {
@@ -315,6 +447,20 @@ mod tests {
             channels: layout,
             format: SampleFormat::F32,
         }
+    }
+
+    #[test]
+    fn test_encode_opus_conformant_produces_ogg() {
+        let buf = silence_buf(1, 1);
+        let mut out = Cursor::new(Vec::new());
+        encode_opus_conformant(&buf, &mut out, OpusConformantMode::Celt)
+            .expect("encode_opus_conformant mono silence");
+        let bytes = out.into_inner();
+        assert_eq!(&bytes[..4], b"OggS", "output must start with OggS magic");
+        assert!(
+            bytes.windows(8).any(|w| w == b"OpusHead"),
+            "OpusHead magic must appear"
+        );
     }
 
     #[test]

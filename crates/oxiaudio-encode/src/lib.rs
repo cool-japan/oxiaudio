@@ -48,7 +48,10 @@ pub use flac_streaming::FlacStreamingEncoder;
 pub use id3::Id3v24Tag;
 pub use ogg::{ogg_crc32, write_ogg_page, write_vorbis_comment_packet, OggStream};
 pub use opus_celt::encode_celt_frame_conformant;
-pub use opus_encoder::{encode_opus, encode_opus_file, OpusEncodeConfig, OpusStreamEncoder};
+pub use opus_encoder::{
+    encode_opus, encode_opus_conformant, encode_opus_conformant_file, encode_opus_file,
+    OpusConformantMode, OpusEncodeConfig, OpusStreamEncoder,
+};
 pub use opus_hybrid::{encode_hybrid_frame, hybrid_toc, should_use_hybrid};
 pub use opus_hybrid_conform::encode_hybrid_frame_conformant;
 pub use opus_silk::{analyze_silk_frame, encode_silk_frame, SilkBandwidth, SilkLpcFrame};

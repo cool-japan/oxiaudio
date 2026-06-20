@@ -127,7 +127,7 @@ Pure Rust DSP crate. Implements resampling (rubato sinc SIMD), gain, channel uti
 
 ## Integration
 - [~] Integrate with oxisound for real-time DSP: audio input callback -> biquad/compressor/EQ chain -> output callback (~example; pending oxisound integration, not blockable by this crate alone)
-- [~] Feed `StreamingDecoder` chunks through `DspChain` via `AudioSource`/`AudioSink` pipeline (~example; pending external integration, not blockable by this crate alone)
+- [x] Feed `StreamingDecoder` chunks through `DspChain` via `AudioSource`/`AudioSink` pipeline (~example) — implemented at facade level: `crates/oxiaudio/tests/m_pipeline.rs` (`test_dsp_chunk_streaming_to_wav`, task 3g: biquad-filtered chunks fed to `WavStreamEncoder` via `AudioSink`) and `crates/oxiaudio/tests/m_stream_pitch.rs` (full `decode_stream_with_block_size` → `dsp::pitch_shift` → `WavStreamEncoder` pipeline, 1s 44.1kHz stereo, all assertions pass).
 - [~] Provide spectral features (MFCC, chroma, spectral centroid) to ML crates for audio classification/similarity (~bridge API; pending ML crate availability, not blockable by this crate alone)
 - [x] dasp signal graph adapter: `AudioBuffer -> dasp::signal::Signal<Frame = [f32; 2]>` for interop with dasp Envelope and Interpolator (~30 SLOC)
 - [x] Ensure all spectral functions use OxiFFT, not rustfft, per COOLJAPAN policy (~dependency audit) — audited: no rustfft in source or Cargo.toml; OxiFFT already in use throughout

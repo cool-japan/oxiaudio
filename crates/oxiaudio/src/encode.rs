@@ -107,7 +107,7 @@ pub use oxiaudio_encode::encode_silk_frame;
 
 /// Encode an `AudioBuffer<f32>` to an OGG Vorbis file at `path`.
 ///
-/// Produces a valid Vorbis I stream (silence scaffold; real MDCT encoding pending).
+/// Produces a valid Vorbis I stream with real MDCT-encoded audio (floor type-1 + residue VQ).
 /// Accepts 44100 or 48000 Hz mono or stereo input.
 #[must_use = "discarding the Result ignores encode errors"]
 pub fn encode_vorbis_to_file(
@@ -119,7 +119,7 @@ pub fn encode_vorbis_to_file(
 
 /// Encode an `AudioBuffer<f32>` to an AAC-LC ADTS file at `path`.
 ///
-/// Produces a valid ADTS framing (silence scaffold; MDCT audio encoding pending).
+/// Produces a valid AAC-LC ADTS stream with real MDCT spectral (CB11/ESC_HCB) Huffman encoding.
 /// Accepts 1–2 channels at common sample rates.
 #[must_use = "discarding the Result ignores encode errors"]
 pub fn encode_aac_to_file(
@@ -382,6 +382,38 @@ pub use oxiaudio_encode::encode_opus;
 ///
 /// Convenience wrapper around [`encode_opus`].
 pub use oxiaudio_encode::encode_opus_file;
+
+/// Mode selector for [`encode_opus_conformant`] — chooses the conformant
+/// per-frame Opus encoder (CELT, SILK, or Hybrid).
+pub use oxiaudio_encode::OpusConformantMode;
+
+/// Encode an [`AudioBuffer<f32>`] to OGG Opus using the **RFC 6716–conformant**
+/// per-frame encoders (opt-in alternative to [`encode_opus`]).
+///
+/// Unlike [`encode_opus`] (which uses a non-conformant 4-bit placeholder CELT
+/// path), this routes each 20 ms frame through a conformant SILK/CELT/Hybrid
+/// writer, producing an OGG Opus stream that standard Opus decoders accept.
+///
+/// # Conformance level (measured against the `opus-decoder` reference crate)
+/// - [`OpusConformantMode::Celt`] (default-quality): full MDCT + PVQ; decoded
+///   output correlates (>0.1) with the input tone — real spectral content, but
+///   this is a coarse "not-silence" gate, **not** high-SNR transparency.
+/// - [`OpusConformantMode::Silk`]: **silence-only** — the conformant SILK writer
+///   currently emits an inactive zero-excitation frame and ignores PCM content.
+/// - [`OpusConformantMode::Hybrid`]: low band silence + CELT high-band (bands 17–20).
+///
+/// Audio frames are mono; stereo input is downmixed to mono per frame (the OGG
+/// `OpusHead` still advertises the input channel count, matching [`encode_opus`]).
+///
+/// [`encode_opus`] and its byte output are unaffected by this function.
+pub use oxiaudio_encode::encode_opus_conformant;
+
+/// Encode an [`AudioBuffer<f32>`] to a conformant OGG Opus file at `path`.
+///
+/// File-writing convenience wrapper around [`encode_opus_conformant`]; see that
+/// function for the per-mode conformance caveats (SILK is silence-only, CELT is
+/// coarse-gated, not transparent).
+pub use oxiaudio_encode::encode_opus_conformant_file;
 
 // ─── M19 — FLAC MD5 verification ─────────────────────────────────────────────
 

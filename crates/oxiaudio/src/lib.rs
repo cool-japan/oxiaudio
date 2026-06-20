@@ -199,6 +199,9 @@ pub use encode::{
     encode_normalized_wav,
     encode_normalized_wav_file,
     encode_opus,
+    // Opt-in RFC 6716–conformant Opus encoders
+    encode_opus_conformant,
+    encode_opus_conformant_file,
     encode_opus_file,
     encode_silk_frame,
     encode_stream,
@@ -247,6 +250,7 @@ pub use encode::{
     FlacStreamingEncoder,
     Id3v24Tag,
     LoudnessTarget,
+    OpusConformantMode,
     OpusEncodeConfig,
     OpusStreamEncoder,
     SilkBandwidth,

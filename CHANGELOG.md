@@ -3,7 +3,28 @@
 All notable changes to OxiAudio are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
-## [Unreleased]
+## [0.1.3] - 2026-06-19
+
+### Added
+- **RFC 6716–conformant OGG Opus encoder** (`oxiaudio-encode`, `oxiaudio`): opt-in
+  `encode_opus_conformant<W: Write>(buf, writer, mode)` and `encode_opus_conformant_file`
+  that route each 20 ms frame through conformant SILK / CELT / Hybrid per-frame writers
+  and produce a structurally valid OGG Opus stream accepted by standard Opus decoders.
+- **`OpusConformantMode` enum** (`oxiaudio-encode`, `oxiaudio`): `Celt` (full MDCT + PVQ;
+  decoded output correlates >0.1 with a 440 Hz input tone), `Silk` (silence-only —
+  zero-excitation inactive frame; decodes cleanly), `Hybrid` (SILK WB silence + CELT
+  high-band bands 17–20); re-exported from the `oxiaudio` facade crate.
+- **Opt-in conformance integration tests** (`crates/oxiaudio-encode/tests/m_opus_conformant_optin.rs`):
+  203-line integration test suite verifying that each mode roundtrips through `opus-decoder`;
+  confirms CELT 440 Hz correlation, SILK silence decodability, Hybrid finite-sample output,
+  file-write path, and backward-compatibility of the legacy `encode_opus` TOC byte (`0xE0`).
+
+### Changed
+- **Doc-comment updates** (`oxiaudio/src/encode.rs`): `encode_vorbis_to_file` and
+  `encode_aac_to_file` doc-strings updated to reflect that MDCT encoding is implemented
+  (Vorbis: floor type-1 + residue VQ; AAC-LC: CB11/ESC_HCB Huffman spectral encoding).
+
+---
 
 ## [0.1.2] - 2026-06-10
 
@@ -313,5 +334,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - `AudioPipeline` parallel branch nodes with per-node bypass/mute and latency reporting
 - Optional `serde` feature: JSON-serializable core types (AudioBuffer, AudioFormat, AudioMetadata, ChannelLayout, SampleFormat)
 
+[0.1.3]: https://github.com/cool-japan/oxiaudio/releases/tag/v0.1.3
 [0.1.2]: https://github.com/cool-japan/oxiaudio/releases/tag/v0.1.2
 [0.1.1]: https://github.com/cool-japan/oxiaudio/releases/tag/v0.1.1

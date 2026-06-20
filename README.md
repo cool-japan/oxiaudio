@@ -2,7 +2,7 @@
 
 Pure-Rust audio processing workspace: decode, encode, DSP effects, and spectral analysis.
 
-**Version:** 0.1.2 | **MSRV:** 1.80 | **License:** Apache-2.0
+**Version:** 0.1.3 | **MSRV:** 1.80 | **License:** Apache-2.0
 
 ## Format Support
 
@@ -98,7 +98,7 @@ oxiaudio::encode_flac(&with_reverb, Path::new("output.flac")).expect("encode fai
 
 ## Status
 
-All M0–M23 milestones complete; Opus CELT/SILK/Hybrid encoders conformant as of 2026-06-10 (v0.1.2).
+All M0–M23 milestones complete; Opus CELT/SILK/Hybrid encoders conformant as of 2026-06-10 (v0.1.3 (work in progress)).
 
 - **1,133 tests passing**, 0 clippy warnings
 - **41,033+ production SLoC** across 6 crates
