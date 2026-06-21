@@ -117,7 +117,7 @@ All fallible functions return [`oxiaudio_core::OxiAudioError`] — most failures
 - [`oxiaudio-core`](../oxiaudio-core) — `AudioBuffer`, `AudioEncoder`, `OxiAudioError`
 - [`oxiaudio-encode`](../oxiaudio-encode) — Pure-Rust WAV / FLAC / AIFF / AU / Vorbis / AAC / Opus encoders (enables this crate via its `mp3` feature)
 - [`oxiaudio-dsp`](../oxiaudio-dsp) — for accurate EBU R128 loudness (`loudness_lufs`) instead of the RMS approximation here
-- [`oxiaudio`](../oxiaudio) — the facade; enable `mp3-encode-lame` or `full` to surface MP3 encoding
+- [`oxiaudio`](../oxiaudio) — the pure facade (MP3 *decode* only); depend on THIS crate directly for MP3 *encode*.
 
 ## License
 

@@ -86,9 +86,6 @@ use oxiaudio_core::{
     AudioBuffer, AudioEncoder, AudioSink, ChannelLayout, OxiAudioError, SampleFormat,
 };
 
-#[cfg(feature = "mp3")]
-pub use oxiaudio_encode_mp3_lame::lame::{LameMode, LameMp3Encoder, VbrPreset};
-
 // ─── AIFF writer ──────────────────────────────────────────────────────────────
 
 /// Convert an `f64` sample rate to Apple's 80-bit IEEE 754 Extended (SANE) format.

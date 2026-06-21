@@ -12,13 +12,10 @@ Decoding (WAV/RF64, FLAC, MP3, OGG Vorbis, AAC/M4A, AIFF/AIFF-C, OGG Opus) is Pu
 ```toml
 [dependencies]
 # Pure-Rust decode + encode + DSP (default):
-oxiaudio = "0.1.0"
+oxiaudio = "0.2"
 
 # Add LAME MP3 encoding (LGPL, FFI):
-oxiaudio = { version = "0.1.0", features = ["mp3-encode-lame"] }
-
-# Everything (pure + LAME MP3):
-oxiaudio = { version = "0.1.0", features = ["full"] }
+# MP3 *encoding* (LAME, LGPL FFI) is NOT in this pure facade; depend on `oxiaudio-encode-mp3-lame` directly.
 ```
 
 ## Quick Start
@@ -171,8 +168,6 @@ let lufs = oxiaudio::dsp::loudness_lufs(&buf);      // EBU R128
 | Feature | Default | Pure Rust | Description |
 |---------|---------|-----------|-------------|
 | `pure` | **yes** | Yes | Enables `oxiaudio-decode`, `oxiaudio-encode`, `oxiaudio-dsp` + rayon — the full Pure-Rust pipeline (`decode_*`, `encode_*`, `dsp::*`, transcode) |
-| `mp3-encode-lame` | no | **No (LGPL FFI)** | Enables the LAME MP3 encoder and surfaces `encode_mp3_with_auto_replaygain`, `AlbumArt`, `compute_replaygain_gain_approx` |
-| `full` | no | No | `pure` + `mp3-encode-lame` |
 | `serde` | no | Yes | Enables `serde` on `oxiaudio-core` types |
 
 ## Re-exports at the crate root (from `oxiaudio-core`)

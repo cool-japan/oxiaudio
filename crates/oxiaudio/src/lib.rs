@@ -1,7 +1,7 @@
 //! # OxiAudio
 //!
 //! Pure-Rust audio processing workspace. Default features are C-free; LAME MP3 encoding
-//! is available via the `mp3-encode-lame` feature (LGPL, FFI).
+//! is provided only by the separate `oxiaudio-encode-mp3-lame` quarantine crate (LGPL, FFI), not this pure facade.
 //!
 //! ## Supported formats (decode)
 //!
@@ -22,7 +22,6 @@
 //! | FLAC | Yes | default |
 //! | AIFF | Yes | default |
 //! | AU | Yes | default |
-//! | MP3 (via LAME) | No (FFI) | mp3-encode-lame |
 //!
 //! ## Quick start
 //!
@@ -260,15 +259,6 @@ pub use encode::{
     WavBitDepth,
     WavStreamEncoder,
 };
-
-#[cfg(all(feature = "pure", feature = "mp3-encode-lame"))]
-pub use encode::AlbumArt;
-
-#[cfg(all(feature = "pure", feature = "mp3-encode-lame"))]
-pub use oxiaudio_encode_mp3_lame::compute_replaygain_gain_approx;
-
-#[cfg(all(feature = "pure", feature = "mp3-encode-lame"))]
-pub use oxiaudio_encode_mp3_lame::lame::encode_mp3_with_auto_replaygain;
 
 #[cfg(feature = "pure")]
 pub use pipeline::{
