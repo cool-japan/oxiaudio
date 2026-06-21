@@ -9,6 +9,7 @@ rust-version.workspace = true
 description = "Pure-Rust audio encoders (WAV via hound, FLAC via flacenc) for OxiAudio"
 categories = ["multimedia::audio"]
 keywords = ["audio", "encode", "wav", "flac", "pure-rust"]
+readme = "README.md"
 
 [dependencies]
 oxiaudio-core = { workspace = true }
@@ -20,8 +21,8 @@ oxifft = { workspace = true }
 [dev-dependencies]
 hound = { workspace = true }
 oxiaudio-core = { workspace = true }
-oxiaudio-decode = { path = "../oxiaudio-decode" }
-oxiaudio-dsp = { path = "../oxiaudio-dsp" }
+oxiaudio-decode = { workspace = true }
+oxiaudio-dsp = { workspace = true }
 criterion = { workspace = true }
 opus-decoder = { workspace = true }
 

@@ -11,13 +11,13 @@ The crate is `#![deny(unsafe_code)]`; the only `unsafe` lives behind the optiona
 
 ```toml
 [dependencies]
-oxiaudio-decode = "0.1.0"
+oxiaudio-decode = "0.2.0"
 
 # With memory-mapped file decoding (decode_file_mmap):
-oxiaudio-decode = { version = "0.1.0", features = ["mmap"] }
+oxiaudio-decode = { version = "0.2.0", features = ["mmap"] }
 
 # With the pure-Rust OGG Opus decoder:
-oxiaudio-decode = { version = "0.1.0", features = ["opus"] }
+oxiaudio-decode = { version = "0.2.0", features = ["opus"] }
 ```
 
 ## Quick Start

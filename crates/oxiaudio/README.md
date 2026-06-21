@@ -3,9 +3,9 @@
 [![Crates.io](https://img.shields.io/crates/v/oxiaudio.svg)](https://crates.io/crates/oxiaudio)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-`oxiaudio` is the top-level façade crate of the OxiAudio stack. It re-exports the core buffer types, decoders, encoders, and DSP under one roof so you can `decode_file → dsp → encode_*` without wiring up the member crates yourself. With the default `pure` feature, the entire pipeline is 100% Pure Rust (`#![forbid(unsafe_code)]`) — no C/C++/Fortran. MP3 *encoding* via LAME is the only non-Pure-Rust path and is opt-in behind the LGPL `mp3-encode-lame` feature.
+`oxiaudio` is the top-level façade crate of the OxiAudio stack. It re-exports the core buffer types, decoders, encoders, and DSP under one roof so you can `decode_file → dsp → encode_*` without wiring up the member crates yourself. With the default `pure` feature, the entire pipeline is 100% Pure Rust (`#![forbid(unsafe_code)]`) — no C/C++/Fortran. MP3 *encoding* is **not** part of this facade; it is opt-in via the separate `oxiaudio-encode-mp3-lame` quarantine crate (LGPL FFI), which must be depended on directly.
 
-Decoding (WAV/RF64, FLAC, MP3, OGG Vorbis, AAC/M4A, AIFF/AIFF-C, OGG Opus) is Pure Rust via Symphonia and OxiAudio's own readers. Encoding covers WAV/RF64, FLAC, AIFF, AU, Vorbis, AAC, and Opus in Pure Rust, plus MP3 via the optional LAME adapter.
+Decoding (WAV/RF64, FLAC, MP3, OGG Vorbis, AAC/M4A, AIFF/AIFF-C, OGG Opus) is Pure Rust via Symphonia and OxiAudio's own readers. Encoding covers WAV/RF64, FLAC, AIFF, AU, Vorbis, AAC, and Opus in Pure Rust. MP3 encoding requires `oxiaudio-encode-mp3-lame` as a direct dependency.
 
 ## Installation
 
@@ -47,7 +47,7 @@ oxiaudio::encode_flac(&with_reverb, Path::new("output.flac"))?;
 | [`oxiaudio-decode`](../oxiaudio-decode) | `decode_*`, format types | Symphonia + Pure-Rust decoders (feature `pure`) |
 | [`oxiaudio-encode`](../oxiaudio-encode) | `encode_*`, encoder types | WAV/FLAC/AIFF/AU/Vorbis/AAC/Opus encoders (feature `pure`) |
 | [`oxiaudio-dsp`](../oxiaudio-dsp) | `dsp::*` | Resampling, dynamics, effects, loudness, spectral (feature `pure`) |
-| [`oxiaudio-encode-mp3-lame`](../oxiaudio-encode-mp3-lame) | `encode_mp3_with_auto_replaygain`, `AlbumArt`, … | LAME MP3 adapter (feature `mp3-encode-lame`) |
+| [`oxiaudio-encode-mp3-lame`](../oxiaudio-encode-mp3-lame) | *(not in facade)* | LAME MP3 quarantine crate — depend on it directly for MP3 encoding |
 
 ## Supported Formats
 
@@ -74,7 +74,7 @@ oxiaudio::encode_flac(&with_reverb, Path::new("output.flac"))?;
 | OGG Vorbis | Yes | `pure` (default) |
 | AAC-LC / M4A | Yes | `pure` (default) |
 | OGG Opus | Yes | `pure` (default) |
-| MP3 (via LAME) | **No (FFI, LGPL)** | `mp3-encode-lame` |
+| MP3 (via LAME) | **No (FFI, LGPL)** | not in facade — use `oxiaudio-encode-mp3-lame` crate directly |
 
 ## Top-level Entry Functions
 

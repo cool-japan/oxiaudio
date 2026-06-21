@@ -67,7 +67,7 @@ impl Default for FlacMetaConfig {
 ///   data:   [u8]        (UTF-8 "KEY=value", no null)
 /// ```
 fn build_vorbis_comment_payload(comments: &[(String, String)]) -> Vec<u8> {
-    const VENDOR: &str = "OxiAudio 0.1.0";
+    const VENDOR: &str = concat!("OxiAudio ", env!("CARGO_PKG_VERSION"));
     let vendor_bytes = VENDOR.as_bytes();
 
     let mut payload = Vec::new();

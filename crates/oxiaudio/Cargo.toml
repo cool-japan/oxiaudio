@@ -9,6 +9,7 @@ rust-version.workspace = true
 description = "OxiAudio — COOLJAPAN Pure-Rust audio codec + DSP facade"
 categories = ["multimedia::audio"]
 keywords = ["audio", "codec", "pure-rust", "cooljapan", "oxiaudio"]
+readme = "README.md"
 
 [features]
 default = ["pure"]

@@ -9,6 +9,7 @@ rust-version.workspace = true
 description = "Symphonia-backed audio decoder for OxiAudio"
 categories = ["multimedia::audio"]
 keywords = ["audio", "decode", "symphonia", "pure-rust", "cooljapan"]
+readme = "README.md"
 
 [features]
 ## Enable memory-mapped file I/O path for `decode_file_mmap`.

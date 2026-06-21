@@ -9,6 +9,7 @@ rust-version.workspace = true
 description = "Core traits and types for OxiAudio"
 categories = ["multimedia::audio"]
 keywords = ["audio", "codec", "pure-rust", "cooljapan", "oxiaudio"]
+readme = "README.md"
 
 [features]
 serde = ["dep:serde"]

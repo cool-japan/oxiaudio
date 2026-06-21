@@ -16,16 +16,16 @@
 ```toml
 [dependencies]
 # ReplayGain helper only — Pure Rust, no LAME linkage:
-oxiaudio-encode-mp3-lame = "0.1.0"
+oxiaudio-encode-mp3-lame = "0.2.0"
 
 # Full LAME MP3 encoding (LGPL, FFI):
-oxiaudio-encode-mp3-lame = { version = "0.1.0", features = ["mp3-encode-lame"] }
+oxiaudio-encode-mp3-lame = { version = "0.2.0", features = ["mp3-encode-lame"] }
 ```
 
 In practice you normally enable this through the OxiAudio facade:
 
 ```toml
-oxiaudio = { version = "0.1.0", features = ["mp3-encode-lame"] }
+oxiaudio = { version = "0.2.0", features = ["mp3-encode-lame"] }
 ```
 
 ## Quick Start

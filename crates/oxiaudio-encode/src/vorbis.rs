@@ -33,7 +33,7 @@ const BLOCK_SIZE_0: usize = 256;
 const STREAM_SERIAL: u32 = 0xABCD_1234;
 
 /// Vendor string embedded in the comment header.
-const VENDOR_STRING: &str = "OxiAudio 0.1.0 Vorbis encoder";
+const VENDOR_STRING: &str = concat!("OxiAudio ", env!("CARGO_PKG_VERSION"), " Vorbis encoder");
 
 /// Number of MDCT output coefficients (BLOCK_SIZE_1 / 2).
 const N_COEFFS: usize = BLOCK_SIZE_1 / 2; // 1024
