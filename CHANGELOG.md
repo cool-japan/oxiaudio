@@ -3,6 +3,11 @@
 All notable changes to OxiAudio are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
+## [0.2.1] - Unreleased
+
+### Changed
+- (placeholder)
+
 ## [0.2.0] - 2026-06-21
 
 ### Changed
