@@ -108,7 +108,8 @@ pub fn encode_opus<W: Write>(
     stream.write_packet(&head, 0, false)?;
 
     // ── Page 1: OpusTags ──────────────────────────────────────────────────────
-    let tags = write_vorbis_comment_packet("OxiAudio 0.1.0", &[], true);
+    let tags =
+        write_vorbis_comment_packet(concat!("OxiAudio ", env!("CARGO_PKG_VERSION")), &[], true);
     stream.write_packet(&tags, 0, false)?;
 
     // ── Audio pages: one OGG packet per CELT frame ───────────────────────────
@@ -243,7 +244,8 @@ pub fn encode_opus_conformant<W: Write>(
     let head = write_opus_head(channels as u8, PRE_SKIP, buf.sample_rate);
     stream.write_packet(&head, 0, false)?;
 
-    let tags = write_vorbis_comment_packet("OxiAudio 0.1.0", &[], true);
+    let tags =
+        write_vorbis_comment_packet(concat!("OxiAudio ", env!("CARGO_PKG_VERSION")), &[], true);
     stream.write_packet(&tags, 0, false)?;
 
     let frame_samples = FRAME_SIZE * channels;
@@ -357,7 +359,8 @@ impl<W: Write> OpusStreamEncoder<W> {
         let mut stream = OggStream::new(writer, serial);
         let head = write_opus_head(channels as u8, PRE_SKIP, OPUS_SAMPLE_RATE);
         stream.write_packet(&head, 0, false)?;
-        let tags = write_vorbis_comment_packet("OxiAudio 0.1.0", &[], true);
+        let tags =
+            write_vorbis_comment_packet(concat!("OxiAudio ", env!("CARGO_PKG_VERSION")), &[], true);
         stream.write_packet(&tags, 0, false)?;
         let toc: u8 = (28u8 << 3) | (if channels == 2 { 0x04 } else { 0x00 });
         Ok(Self {

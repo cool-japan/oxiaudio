@@ -16,16 +16,16 @@
 ```toml
 [dependencies]
 # ReplayGain helper only — Pure Rust, no LAME linkage:
-oxiaudio-encode-mp3-lame = "0.1.0"
+oxiaudio-encode-mp3-lame = "0.2.0"
 
 # Full LAME MP3 encoding (LGPL, FFI):
-oxiaudio-encode-mp3-lame = { version = "0.1.0", features = ["mp3-encode-lame"] }
+oxiaudio-encode-mp3-lame = { version = "0.2.0", features = ["mp3-encode-lame"] }
 ```
 
 In practice you normally enable this through the OxiAudio facade:
 
 ```toml
-oxiaudio = { version = "0.1.0", features = ["mp3-encode-lame"] }
+oxiaudio = { version = "0.2.0", features = ["mp3-encode-lame"] }
 ```
 
 ## Quick Start
@@ -117,7 +117,7 @@ All fallible functions return [`oxiaudio_core::OxiAudioError`] — most failures
 - [`oxiaudio-core`](../oxiaudio-core) — `AudioBuffer`, `AudioEncoder`, `OxiAudioError`
 - [`oxiaudio-encode`](../oxiaudio-encode) — Pure-Rust WAV / FLAC / AIFF / AU / Vorbis / AAC / Opus encoders (enables this crate via its `mp3` feature)
 - [`oxiaudio-dsp`](../oxiaudio-dsp) — for accurate EBU R128 loudness (`loudness_lufs`) instead of the RMS approximation here
-- [`oxiaudio`](../oxiaudio) — the facade; enable `mp3-encode-lame` or `full` to surface MP3 encoding
+- [`oxiaudio`](../oxiaudio) — the pure facade (MP3 *decode* only); depend on THIS crate directly for MP3 *encode*.
 
 ## License
 

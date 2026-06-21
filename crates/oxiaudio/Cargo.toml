@@ -9,6 +9,7 @@ rust-version.workspace = true
 description = "OxiAudio — COOLJAPAN Pure-Rust audio codec + DSP facade"
 categories = ["multimedia::audio"]
 keywords = ["audio", "codec", "pure-rust", "cooljapan", "oxiaudio"]
+readme = "README.md"
 
 [features]
 default = ["pure"]
@@ -18,11 +19,6 @@ pure = [
     "dep:oxiaudio-dsp",
     "dep:rayon",
 ]
-mp3-encode-lame = [
-    "dep:oxiaudio-encode-mp3-lame",
-    "oxiaudio-encode-mp3-lame/mp3-encode-lame",
-]
-full = ["pure", "mp3-encode-lame"]
 serde = ["oxiaudio-core/serde"]
 
 [dependencies]
@@ -30,7 +26,6 @@ oxiaudio-core            = { workspace = true }
 oxiaudio-decode          = { workspace = true, optional = true }
 oxiaudio-encode          = { workspace = true, optional = true }
 oxiaudio-dsp             = { workspace = true, optional = true }
-oxiaudio-encode-mp3-lame = { workspace = true, optional = true }
 rayon                    = { workspace = true, optional = true }
 
 [dev-dependencies]

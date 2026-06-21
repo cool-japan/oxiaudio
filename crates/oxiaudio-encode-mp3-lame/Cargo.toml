@@ -9,6 +9,7 @@ rust-version.workspace = true
 description = "OxiAudio MP3 encoder adapter — BOUNDED_FFI: links libmp3lame (LGPL); use requires opt-in feature"
 categories = ["multimedia::audio"]
 keywords = ["mp3", "encode", "lame", "ffi", "audio"]
+readme = "README.md"
 
 [features]
 mp3-encode-lame = ["dep:mp3lame-encoder"]

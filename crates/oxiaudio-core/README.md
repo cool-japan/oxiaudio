@@ -11,10 +11,10 @@ The crate is **100% Pure Rust** with `#![forbid(unsafe_code)]`. Its only runtime
 
 ```toml
 [dependencies]
-oxiaudio-core = "0.1.0"
+oxiaudio-core = "0.2.0"
 
 # With serde derives on the public data types:
-oxiaudio-core = { version = "0.1.0", features = ["serde"] }
+oxiaudio-core = { version = "0.2.0", features = ["serde"] }
 ```
 
 ## Quick Start

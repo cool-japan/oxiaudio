@@ -3,6 +3,36 @@
 All notable changes to OxiAudio are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
+## [0.2.0] - 2026-06-21
+
+### Changed
+- **Pure Rust Policy v2 compliance** (`oxiaudio`): the facade's `--all-features` dependency
+  closure is now L1-clean (zero `-sys` / FFI). MP3 *encoding* (LAME / libmp3lame, LGPL FFI)
+  is no longer reachable from the pure crates and is opt-in only by depending on the
+  `oxiaudio-encode-mp3-lame` quarantine crate directly. MP3 *decode* remains Pure Rust in
+  the facade.
+- Workspace version bumped from 0.1.3 to 0.2.0 (`version` in `[workspace.package]`); all
+  internal path-dependency versions updated 0.1.3 → 0.2.0.
+- Documentation updated for the new MP3-encode boundary: `oxiaudio` crate-level docs,
+  `crates/oxiaudio/README.md`, and `crates/oxiaudio-encode-mp3-lame/README.md` now state that
+  MP3 encoding lives only in the quarantine crate (the pure facade exposes MP3 decode only).
+
+### Removed
+- **`oxiaudio` facade:** removed the `mp3-encode-lame` and `full` Cargo features and the
+  optional `oxiaudio-encode-mp3-lame` dependency.
+- **`oxiaudio` facade:** removed the `mp3-encode-lame`-gated crate-root re-exports `AlbumArt`,
+  `compute_replaygain_gain_approx`, and `encode_mp3_with_auto_replaygain`.
+- **`oxiaudio-encode`:** removed the `mp3` Cargo feature and the optional
+  `oxiaudio-encode-mp3-lame` back-edge dependency (its entire `[features]` block was deleted).
+- **`oxiaudio-encode`:** removed the `mp3`-gated re-exports `LameMode`, `LameMp3Encoder`, and
+  `VbrPreset`.
+
+### Security
+- Eliminated the libmp3lame C FFI from the `oxiaudio` facade's `--all-features` dependency
+  closure, removing the C / `unsafe` attack surface (and LGPL obligation) from the pure
+  facade. MP3-encode FFI is now isolated behind the opt-in `oxiaudio-encode-mp3-lame`
+  quarantine crate.
+
 ## [0.1.3] - 2026-06-19
 
 ### Added
@@ -334,6 +364,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - `AudioPipeline` parallel branch nodes with per-node bypass/mute and latency reporting
 - Optional `serde` feature: JSON-serializable core types (AudioBuffer, AudioFormat, AudioMetadata, ChannelLayout, SampleFormat)
 
+[0.2.0]: https://github.com/cool-japan/oxiaudio/releases/tag/v0.2.0
 [0.1.3]: https://github.com/cool-japan/oxiaudio/releases/tag/v0.1.3
 [0.1.2]: https://github.com/cool-japan/oxiaudio/releases/tag/v0.1.2
 [0.1.1]: https://github.com/cool-japan/oxiaudio/releases/tag/v0.1.1

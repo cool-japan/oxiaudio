@@ -5,16 +5,16 @@
 
 `oxiaudio-encode` is the encode-side workhorse of the OxiAudio stack. It turns an [`oxiaudio_core::AudioBuffer<f32>`] into WAV, FLAC, AIFF / AIFF-C, AU/SND, OGG Vorbis, AAC-LC / M4A, and OGG Opus byte streams — all in `#![forbid(unsafe_code)]` Pure Rust. WAV is backed by `hound`, FLAC by `flacenc`, and the remaining containers are written by hand-rolled encoders in this crate. It also provides metadata writers (ID3v2.4, APEv2, FLAC Vorbis-comments + pictures, WAV cue sheets), streaming encoders, TPDF dithering, and two-pass loudness normalization.
 
-This crate carries no MP3 encoder of its own: MP3 lives behind the optional `mp3` feature, which pulls in the LGPL `oxiaudio-encode-mp3-lame` FFI adapter. With default features the crate is 100% C/C++/Fortran-free.
+This crate carries no MP3 encoder. MP3 encoding is opt-in via the separate `oxiaudio-encode-mp3-lame` quarantine crate, which must be depended on directly. With default features (and without that crate) this crate is 100% C/C++/Fortran-free.
 
 ## Installation
 
 ```toml
 [dependencies]
-oxiaudio-encode = "0.1.0"
+oxiaudio-encode = "0.2.0"
 
-# With LAME MP3 encoding (LGPL, FFI — opt-in, not Pure Rust):
-oxiaudio-encode = { version = "0.1.0", features = ["mp3"] }
+# MP3 encoding is NOT in this crate; depend on `oxiaudio-encode-mp3-lame` directly:
+# oxiaudio-encode-mp3-lame = { version = "0.2.0", features = ["mp3-encode-lame"] }
 ```
 
 ## Quick Start
@@ -191,12 +191,6 @@ All functions accept an `AudioBuffer<f32>` and return `Result<_, oxiaudio_core::
 
 `WavStreamEncoder` and `FlacStreamEncoder` also implement [`oxiaudio_core::AudioSink`].
 
-## Feature Flags
-
-| Feature | Default | Description |
-|---------|---------|-------------|
-| `mp3` | no | Pulls in `oxiaudio-encode-mp3-lame` and re-exports `LameMp3Encoder`, `LameMode`, `VbrPreset`. **LGPL, FFI — not Pure Rust.** |
-
 ## Error Variants
 
 All fallible functions return [`oxiaudio_core::OxiAudioError`]:
@@ -216,7 +210,7 @@ All fallible functions return [`oxiaudio_core::OxiAudioError`]:
 
 - [`oxiaudio-core`](../oxiaudio-core) — shared `AudioBuffer`, `AudioEncoder`, `AudioSink`, `ChannelLayout`, `OxiAudioError`
 - [`oxiaudio-decode`](../oxiaudio-decode) — the decode-side counterpart
-- [`oxiaudio-encode-mp3-lame`](../oxiaudio-encode-mp3-lame) — LAME MP3 adapter behind the `mp3` feature
+- [`oxiaudio-encode-mp3-lame`](../oxiaudio-encode-mp3-lame) — LAME MP3 adapter; depend on it directly for MP3 encoding
 - [`oxiaudio-dsp`](../oxiaudio-dsp) — resampling, dynamics, effects, loudness analysis
 - [`oxiaudio`](../oxiaudio) — the top-level facade that re-exports this crate
 

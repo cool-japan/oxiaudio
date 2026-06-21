@@ -343,12 +343,6 @@ pub use oxiaudio_encode::encode_normalized_wav;
 /// Two-pass loudness normalization: measure → gain → encode as WAV to a file path.
 pub use oxiaudio_encode::encode_normalized_wav_file;
 
-/// `AlbumArt` struct for embedding cover art in MP3 tags.
-///
-/// Only available with the `mp3-encode-lame` feature.
-#[cfg(feature = "mp3-encode-lame")]
-pub use oxiaudio_encode_mp3_lame::lame::AlbumArt;
-
 /// Write an AIFF file with optional NAME, AUTH, ANNO metadata chunks, given a file path.
 ///
 /// Convenience wrapper around [`write_aiff_with_chunks`] that creates the file for you.

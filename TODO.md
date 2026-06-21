@@ -2,9 +2,9 @@
 
 Workspace-wide task list. Individual sub-crate TODOs live under `crates/<crate>/TODO.md`.
 
-## Current Status (as of 2026-06-10, v0.1.3 (work in progress))
+## Current Status (as of 2026-06-21, v0.2.0)
 
-All M0–M23 milestones are **complete**. 1,133 tests passing, 0 clippy warnings.
+All M0–M23 milestones are **complete**. 1,139 tests passing, 0 clippy warnings.
 
 Recent fixes (2026-06-03b):
 - Fixed dead-code clippy error in `oxiaudio-decode`: removed unused `window_shape` and `scale_factor_grouping` fields from `IcsInfo` struct (fields are now parsed as local variables and discarded after bitstream-advance; derived `num_window_groups`/`window_group_length` already capture all needed information).

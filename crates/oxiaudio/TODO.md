@@ -1,7 +1,7 @@
 # oxiaudio (facade) TODO
 
 ## Status
-User-facing facade crate composing oxiaudio-decode, oxiaudio-encode, and oxiaudio-dsp behind feature flags. Provides `decode_file`, `decode_file_f64`, `encode_wav`, `encode_flac`, `encode_stream`, `detect_format`, `decode_file_with_metadata`, streaming decode (`decode_stream`, `decode_stream_with_block_size`), and DSP convenience module (`dsp::resample`, `dsp::gain`, `dsp::normalize`, `dsp::trim_silence`, `dsp::mix_to_mono`, `dsp::pitch_shift`, `dsp::split_channels`, `dsp::BiquadFilter`, `dsp::ParametricEq`, `dsp::spectral::stft`, `dsp::spectral::melspectrogram`). Feature flags: `pure` (default), `mp3-encode-lame`, `full`. M0-M4 complete. Criterion benchmarks in benches/facade_bench.rs.
+User-facing facade crate composing oxiaudio-decode, oxiaudio-encode, and oxiaudio-dsp behind feature flags. Provides `decode_file`, `decode_file_f64`, `encode_wav`, `encode_flac`, `encode_stream`, `detect_format`, `decode_file_with_metadata`, streaming decode (`decode_stream`, `decode_stream_with_block_size`), and DSP convenience module (`dsp::resample`, `dsp::gain`, `dsp::normalize`, `dsp::trim_silence`, `dsp::mix_to_mono`, `dsp::pitch_shift`, `dsp::split_channels`, `dsp::BiquadFilter`, `dsp::ParametricEq`, `dsp::spectral::stft`, `dsp::spectral::melspectrogram`). Feature flags: `pure` (default), `serde`. M0-M4 complete. Criterion benchmarks in benches/facade_bench.rs.
 
 ## Core Implementation
 

@@ -383,7 +383,7 @@ impl<W: Write> OggStream<W> {
 /// ```
 /// use oxiaudio_encode::ogg::write_vorbis_comment_packet;
 ///
-/// let pkt = write_vorbis_comment_packet("OxiAudio 0.1.0", &[("TITLE", "Demo")], false);
+/// let pkt = write_vorbis_comment_packet("OxiAudio 0.2.0", &[("TITLE", "Demo")], false);
 /// assert!(pkt.starts_with(&[0x03])); // Vorbis packet type
 /// ```
 pub fn write_vorbis_comment_packet(
@@ -755,7 +755,7 @@ mod tests {
 
     #[test]
     fn test_vorbis_comment_packet_vendor_string_roundtrip() {
-        let vendor = "OxiAudio 0.1.0";
+        let vendor = "OxiAudio 0.2.0";
         let pkt = write_vorbis_comment_packet(vendor, &[], true);
         // After "OpusTags" (8 bytes): vendor_length (u32 LE) at bytes 8-11, vendor string at 12+
         let vlen = u32::from_le_bytes([pkt[8], pkt[9], pkt[10], pkt[11]]) as usize;
