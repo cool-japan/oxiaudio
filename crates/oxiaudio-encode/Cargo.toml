@@ -21,7 +21,6 @@ oxifft = { workspace = true }
 [dev-dependencies]
 hound = { workspace = true }
 oxiaudio-core = { workspace = true }
-oxiaudio-decode = { workspace = true }
 oxiaudio-dsp = { workspace = true }
 criterion = { workspace = true }
 opus-decoder = { workspace = true }

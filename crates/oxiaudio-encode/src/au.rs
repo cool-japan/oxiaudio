@@ -175,40 +175,4 @@ mod tests {
         let ch = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
         assert_eq!(ch, 2, "channels field should be 2");
     }
-
-    /// Encode a mono 44100 Hz sine and decode it back, verifying sample_rate and fidelity.
-    #[test]
-    fn test_au_roundtrip_i16() {
-        let buf = sine_mono(44_100, 0.25);
-        let tmp = std::env::temp_dir().join("oxiaudio_au_roundtrip_i16.au");
-
-        encode_au_file(&buf, &tmp, AuEncoding::I16).expect("encode_au_file failed");
-
-        let decoded = oxiaudio_decode::decode_au_file(&tmp).expect("decode_au_file failed");
-        let _ = std::fs::remove_file(&tmp);
-
-        assert_eq!(
-            decoded.sample_rate, buf.sample_rate,
-            "sample_rate mismatch after roundtrip"
-        );
-        assert_eq!(
-            decoded.samples.len(),
-            buf.samples.len(),
-            "sample count mismatch after roundtrip"
-        );
-
-        // Find the first non-silent sample and verify it is within 2e-4 (I16 quantisation noise).
-        let first_nonsilent = buf
-            .samples
-            .iter()
-            .zip(decoded.samples.iter())
-            .find(|(&orig, _)| orig.abs() > 1e-3);
-        if let Some((&orig, &dec)) = first_nonsilent {
-            assert!(
-                (orig - dec).abs() < 2e-4,
-                "roundtrip error too large: orig={orig} dec={dec} diff={}",
-                (orig - dec).abs()
-            );
-        }
-    }
 }

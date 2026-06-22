@@ -1,0 +1,23 @@
+[package]
+name = "oxiaudio-integration-tests"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Cross-crate round-trip integration tests for the OxiAudio workspace (encode ↔ decode). Not published."
+publish = false
+
+[dev-dependencies]
+oxiaudio-core   = { workspace = true }
+oxiaudio-decode = { workspace = true }
+oxiaudio-encode = { workspace = true }
+oxiaudio-dsp    = { workspace = true }
+hound           = { workspace = true }
+criterion       = { workspace = true }
+opus-decoder    = { workspace = true }
+
+[[bench]]
+name = "decode_bench"
+harness = false
