@@ -7,6 +7,7 @@ members = [
     "crates/oxiaudio-encode-mp3-lame",
     "crates/oxiaudio-dsp",
     "crates/oxiaudio",
+    "crates/oxiaudio-integration-tests",
 ]
 
 [workspace.package]
