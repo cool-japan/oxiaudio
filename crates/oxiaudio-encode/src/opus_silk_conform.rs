@@ -35,9 +35,17 @@
 //!
 //! # Signal quality
 //!
-//! This encoder always produces a silence-like (zero-excitation, inactive-signal) frame.
-//! Full SILK encoding with LP analysis, NLSF VQ, noise shaping, and LTP coding is
-//! deferred to a future run.
+//! [`encode_silk_frame_conformant`] — the public NB entry point — delegates to the
+//! real analysis-by-synthesis encoder in [`crate::opus_silk_encode`]: genuine LP
+//! analysis, NLSF VQ, and shell-coded excitation, **not** silence. See that
+//! module's doc for the exact, measured fidelity caveats (NB-only,
+//! unvoiced-only, independently-coded frames, best-lag correlation ≈
+//! 0.33–0.67 against reference decode).
+//!
+//! The one remaining always-silence path in this module is
+//! `encode_silk_wb_silence_into`, a private helper used only by the hybrid
+//! encoder to fill the WB low band while the real SILK encoder is NB-only —
+//! see that function's own doc.
 
 use crate::opus_range::RangeEncoder;
 
@@ -65,25 +73,6 @@ const DELTA_GAIN_ICDF: [u8; 41] = [
     250, 245, 234, 203, 71, 50, 42, 38, 35, 33, 31, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18,
     17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
 ];
-
-/// NLSF stage-1 iCDF for NB/MB codebook.
-///
-/// 64 entries (two halves of 32):
-///   entries [0..32]  = iCDF for inactive/unvoiced (cb1_offset=0)
-///   entries [32..64] = iCDF for voiced             (cb1_offset=32)
-const NLSF_CB1_ICDF_NB_MB: [u8; 64] = [
-    212, 178, 148, 129, 108, 96, 85, 82, 79, 77, 61, 59, 57, 56, 51, 49, 48, 45, 42, 41, 40, 38,
-    36, 34, 31, 30, 21, 12, 10, 3, 1, 0, 255, 245, 244, 236, 233, 225, 217, 203, 190, 176, 175,
-    161, 149, 136, 125, 114, 102, 91, 81, 71, 60, 52, 43, 35, 28, 20, 19, 18, 12, 11, 5, 0,
-];
-
-/// NLSF stage-2 iCDF, row 0 of the NB/MB codebook (9 entries, symbols 0..8).
-///
-/// For cb1_index=0 with signal_type=0, `unpack_nlsf_ec_ix` maps all 10 NB
-/// dimensions to ec_ix[i]=0, so they all use this row.
-///
-/// Symbol 4 represents amplitude = 4 − NLSF_QUANT_MAX_AMPLITUDE(4) = 0 (neutral).
-const NLSF_CB2_ROW0_NB_MB: [u8; 9] = [255, 254, 253, 238, 14, 3, 2, 1, 0];
 
 /// NLSF interpolation-factor iCDF (5 entries, symbols 0..4).
 ///
@@ -135,19 +124,8 @@ const NLSF_CB2_ROW0_WB: [u8; 9] = [255, 254, 253, 244, 12, 3, 2, 1, 0];
 
 // ── Frame geometry ─────────────────────────────────────────────────────────────
 
-/// TOC byte: config 1 = SILK-only NB 20 ms, mono, 1-frame CBR.
-///
-/// Decoding: `(1 << 3) | (0 << 2) | 0 = 0x08`.
-const TOC_NB_20MS_MONO: u8 = 0x08;
-
-/// Number of subframes in a 20 ms NB SILK frame (4 × 5 ms subframes).
+/// Number of subframes in a 20 ms SILK frame (4 × 5 ms subframes).
 const NB_SUBFR: usize = 4;
-
-/// Number of shell-codec blocks for a 160-sample NB frame: `160 / 16 = 10`.
-const SHELL_BLOCKS_NB_20MS: usize = 10;
-
-/// NLSF order (= LPC order) for NB (narrowband, 8 kHz): 10.
-const NLSF_ORDER_NB: usize = 10;
 
 /// NLSF order (= LPC order) for WB (wideband, 16 kHz): 16.
 const NLSF_ORDER_WB: usize = 16;
@@ -157,87 +135,21 @@ const SHELL_BLOCKS_WB_20MS: usize = 20;
 
 // ── Public API ─────────────────────────────────────────────────────────────────
 
-/// Encode PCM as a SILK-mode Opus packet (NB 20 ms, unvoiced, zero excitation).
+/// Encode PCM as a real SILK-mode Opus packet (NB 20 ms, unvoiced excitation).
 ///
-/// Returns a packet that any RFC 6716–compliant decoder can decode without error.
+/// Returns a packet that any RFC 6716–compliant decoder reconstructs to an
+/// approximation of the input speech-band signal. The heavy lifting (LP
+/// analysis, NLSF/gain quantization, analysis-by-synthesis pulse coding) lives
+/// in [`crate::opus_silk_encode`]; see that module for the conformance caveats.
 ///
 /// # Arguments
 ///
-/// * `pcm` — 960 mono f32 samples at 48 kHz (20 ms). Shorter slices are accepted;
-///   longer slices are truncated. The actual PCM content is currently not used —
-///   the encoder always outputs a silence-like inactive frame.
-/// * `_channels` — reserved for future stereo support; currently ignored.
-///
-/// # Packet structure
-///
-/// TOC byte `0x08` followed by a range-coded SILK payload encoding an inactive
-/// (non-VAD), zero-excitation frame with the first NLSF stage-1 codebook entry
-/// and neutral (zero-amplitude) stage-2 residuals.
-pub fn encode_silk_frame_conformant(_pcm: &[f32], _channels: usize) -> Vec<u8> {
-    let mut enc = RangeEncoder::new();
-
-    // ── SILK header: parse_header (1 channel, 1 internal frame) ─────────────
-    // VAD flag for internal frame 0.
-    enc.enc_bit_logp(false, 1);
-    // has_lbrr flag for channel 0.
-    enc.enc_bit_logp(false, 1);
-
-    // ── Side information: decode_indices (Independently, vad=false) ──────────
-
-    // Signal type + quant-offset (no-VAD branch, TYPE_OFFSET_NO_VAD_ICDF).
-    // Symbol 0 → ix=0 → signal_type=0 (inactive), quant_offset_type=0.
-    enc.enc_icdf(0, &TYPE_OFFSET_NO_VAD_ICDF, 8);
-
-    // Gain for subframe 0 (Independently coded = high byte + low byte).
-    enc.enc_icdf(0, &GAIN_ICDF_INACTIVE, 8); // high 3-bit field (symbol 0)
-    enc.enc_icdf(0, &UNIFORM8_ICDF, 8); // low 3-bit residual  (symbol 0)
-
-    // Delta gains for subframes 1 .. NB_SUBFR-1 (3 additional subframes).
-    for _ in 1..NB_SUBFR {
-        enc.enc_icdf(0, &DELTA_GAIN_ICDF, 8);
-    }
-
-    // NLSF stage-1 codebook index.
-    // signal_type=0 → cb1_offset = (0>>1)*32 = 0 → decode from NLSF_CB1_ICDF_NB_MB[0..].
-    // Symbol 0 → cb1_index=0 (valid: cb.n_vectors=32, 0 < 32).
-    enc.enc_icdf(0, &NLSF_CB1_ICDF_NB_MB, 8);
-
-    // NLSF stage-2 residuals for all NLSF_ORDER_NB=10 dimensions.
-    // cb1_index=0 → unpack_nlsf_ec_ix yields ec_ix[i]=0 for all i →
-    // every dimension uses NLSF_CB2_ROW0_NB_MB (the first 9-byte row of the table).
-    // Symbol 4 → stage2=4 → amplitude = 4 − NLSF_QUANT_MAX_AMPLITUDE(4) = 0 (neutral),
-    // avoids the extension branches (stage2≠0 and stage2≠8).
-    for _ in 0..NLSF_ORDER_NB {
-        enc.enc_icdf(4, &NLSF_CB2_ROW0_NB_MB, 8);
-    }
-
-    // NLSF interpolation factor (decoded only when nb_subfr == MAX_NB_SUBFR=4,
-    // which is true for 20 ms frames).
-    // Symbol 4 → interp_coef_q2=4 → no interpolation (use current NLSFs directly).
-    enc.enc_icdf(4, &NLSF_INTERP_FACTOR_ICDF, 8);
-
-    // No voiced-mode parameters (signal_type=0 ≠ TYPE_VOICED=2).
-
-    // Excitation randomisation seed (uniform 4-way).
-    enc.enc_icdf(0, &UNIFORM4_ICDF, 8);
-
-    // ── Pulse coding: decode_pulses (signal_type=0, frame_length=160) ─────────
-
-    // Rate level for inactive/unvoiced branch: RATE_LEVELS_ICDF[signal_type>>1=0].
-    enc.enc_icdf(0, &RATE_LEVELS_ICDF_INACTIVE, 8);
-
-    // Pulse sums for SHELL_BLOCKS_NB_20MS=10 shell-coded blocks (frame_length=160/16=10).
-    // Symbol 0 → sum_pulses=0 → silence: no shell decode, no LSB extension, no sign decode.
-    for _ in 0..SHELL_BLOCKS_NB_20MS {
-        enc.enc_icdf(0, &PULSES_PER_BLOCK_ICDF_LVL0, 8);
-    }
-
-    // Finalise range coder and prepend TOC byte.
-    let payload = enc.finish();
-    let mut packet = Vec::with_capacity(1 + payload.len());
-    packet.push(TOC_NB_20MS_MONO);
-    packet.extend_from_slice(&payload);
-    packet
+/// * `pcm` — up to 960 mono f32 samples at 48 kHz (20 ms). Shorter slices are
+///   zero-padded to a full 20 ms frame; longer slices are truncated.
+/// * `_channels` — reserved for future stereo support; currently ignored (the
+///   real NB encoder is mono).
+pub fn encode_silk_frame_conformant(pcm: &[f32], _channels: usize) -> Vec<u8> {
+    crate::opus_silk_encode::encode_silk_nb_packet(pcm)
 }
 
 // ── Hybrid helper ─────────────────────────────────────────────────────────────
@@ -332,9 +244,9 @@ mod tests {
         let packet = encode_silk_frame_conformant(&sine_1khz(), 1);
         assert!(!packet.is_empty(), "packet must be non-empty");
         assert_eq!(
-            packet[0], TOC_NB_20MS_MONO,
-            "TOC must be 0x{:02X} (config 1 = NB 20ms mono), got 0x{:02X}",
-            TOC_NB_20MS_MONO, packet[0]
+            packet[0], 0x08,
+            "TOC must be 0x08 (config 1 = NB 20ms mono), got 0x{:02X}",
+            packet[0]
         );
         let config = (packet[0] >> 3) & 0x1F;
         assert!(
@@ -355,13 +267,14 @@ mod tests {
     }
 
     #[test]
-    fn silence_and_sine_produce_equal_structure() {
-        // Since PCM content is not yet used, both should produce identical packets.
+    fn signal_and_silence_now_differ() {
+        // The real encoder codes actual excitation, so a tone and true silence
+        // must produce different packets (unlike the old silence-only stub).
         let p_sine = encode_silk_frame_conformant(&sine_1khz(), 1);
         let p_silence = encode_silk_frame_conformant(&vec![0.0f32; 960], 1);
-        assert_eq!(
+        assert_ne!(
             p_sine, p_silence,
-            "minimal encoder produces PCM-independent packets (signal quality deferred)"
+            "a 1 kHz tone must encode differently from silence"
         );
     }
 }

@@ -11,15 +11,20 @@ mod flac_streaming;
 mod id3;
 pub mod ogg;
 pub mod opus_celt;
+pub mod opus_celt_bands;
+pub mod opus_celt_rate;
 pub mod opus_celt_tables;
+pub mod opus_celt_verify;
 pub mod opus_encoder;
 pub mod opus_hybrid;
 pub mod opus_hybrid_conform;
 pub mod opus_mdct;
 pub mod opus_pvq;
 pub mod opus_range;
+pub mod opus_range_dec;
 pub mod opus_silk;
 pub mod opus_silk_conform;
+pub mod opus_silk_encode;
 pub mod vorbis;
 mod wav_cue;
 mod wav_ext;
@@ -47,10 +52,17 @@ pub use flac_picture::{
 pub use flac_streaming::FlacStreamingEncoder;
 pub use id3::Id3v24Tag;
 pub use ogg::{ogg_crc32, write_ogg_page, write_vorbis_comment_packet, OggStream};
-pub use opus_celt::encode_celt_frame_conformant;
+pub use opus_celt::{
+    celt_frame_bytes_for_bitrate, encode_celt_frame_conformant,
+    encode_celt_frame_conformant_ranged, encode_celt_frame_conformant_sized,
+    encode_celt_frame_conformant_with_history, DEFAULT_CELT_FRAME_BYTES, MAX_CELT_FRAME_BYTES,
+    MIN_CELT_FRAME_BYTES,
+};
 pub use opus_encoder::{
-    encode_opus, encode_opus_conformant, encode_opus_conformant_file, encode_opus_file,
-    OpusConformantMode, OpusEncodeConfig, OpusStreamEncoder,
+    encode_opus, encode_opus_auto, encode_opus_auto_file, encode_opus_conformant,
+    encode_opus_conformant_file, encode_opus_file, encode_opus_structural,
+    encode_opus_structural_file, select_conformant_mode, OpusConformantMode, OpusEncodeConfig,
+    OpusStreamEncoder,
 };
 pub use opus_hybrid::{encode_hybrid_frame, hybrid_toc, should_use_hybrid};
 pub use opus_hybrid_conform::encode_hybrid_frame_conformant;

@@ -2,7 +2,7 @@
 
 Pure-Rust audio processing workspace: decode, encode, DSP effects, and spectral analysis.
 
-**Version:** 0.2.0 | **MSRV:** 1.80 | **License:** Apache-2.0
+**Version:** 0.2.1 | **MSRV:** 1.80 | **License:** Apache-2.0
 
 ## Format Support
 
@@ -18,10 +18,21 @@ Pure-Rust audio processing workspace: decode, encode, DSP effects, and spectral 
 | AAC / M4A | Yes | — | Yes (symphonia) | default |
 | ALAC | Yes | — | Yes (symphonia) | default |
 | Opus (decode) | Yes | — | Yes (opus-decoder) | default |
-| Opus (encode) | — | Yes (CELT/SILK/Hybrid) | Yes | default |
+| Opus (encode) | — | Yes (CELT/SILK auto-select, RFC 6716 conformant — verified via final-range match, up to 510 kbps mono)\* | Yes | default |
 | WavPack | Yes | — | Yes | default |
 | Musepack (SV7/SV8) | Yes | — | Yes | default |
 | MIDI (SMF 0/1/2) | Yes | — | Yes | default |
+
+\* `encode_opus` (the default entry point) routes every 20 ms frame through
+automatic CELT/SILK mode selection; every emitted packet decodes cleanly on a
+standard-conformant decoder, but this is **not** a transparent-quality
+encoder — CELT's stereo split-band angle coding and fine-energy refinement are
+still simplified, and SILK (a genuine analysis-by-synthesis narrowband
+encoder, not silence) is limited to unvoiced excitation with measured best-lag
+correlation ≈ 0.33–0.67 against reference decode. See the `opus_encoder` /
+`opus_celt` / `opus_silk_encode` module docs for exact, measured caveats. The
+pre-0.2.1 non-conformant byte layout is preserved as `encode_opus_structural`
+for byte-compatibility.
 
 ## DSP Features
 
@@ -98,10 +109,38 @@ oxiaudio::encode_flac(&with_reverb, Path::new("output.flac")).expect("encode fai
 
 ## Status
 
-All M0–M23 milestones complete; Opus CELT/SILK/Hybrid encoders conformant as of 2026-06-10 (v0.2.0).
+All M0–M23 milestones complete.
 
-- **1,139 tests passing**, 0 clippy warnings
-- **41,033+ production SLoC** across 6 crates
+- **1,136 tests passing / 5 skipped** (default features) / **1,242 tests passing / 6 skipped**
+  (`--all-features`), plus **63 doc tests** — 0 clippy warnings, 0 rustdoc warnings
+  (`cargo nextest run --workspace` / `cargo test --doc --workspace --all-features` /
+  `cargo clippy --all-targets --all-features -- -D warnings`, measured 2026-08-06)
+- **39,706 lines of production Rust** (`tokei crates/*/src`, Code column) across 95 source files in the
+  6 published crates (a 7th workspace member, `oxiaudio-integration-tests`, is a `publish = false`
+  test-only harness with an empty `src/lib.rs` — it contributes 0 lines to this count)
 - All major codecs, DSP algorithms, and tagging formats implemented
-- Pure-Rust Opus encoder: CELT-only, SILK NB/WB, and Hybrid FB modes (RFC 6716 conformant)
+- Pure-Rust Opus encoder: `encode_opus` (default) auto-selects CELT/SILK per
+  frame, carries lapped-MDCT overlap history across frames, and honours
+  `target_bitrate_kbps`. Its CELT bitstream is **verified** RFC 6716 conformant,
+  not merely assumed: the encoder's `final_range` register matches the reference
+  decoder's for every supported frame size on a corpus including full-scale
+  noise (the canonical libopus conformance check), and the crate ships its own
+  RFC-structured decoder (`opus_range_dec`, `opus_celt_verify`) so the check runs
+  in-tree. Measured reconstruction: per-band decoded level within a few dB of
+  the input, overall level within ±3 dB.
+  It is still **not** transparent-quality: CELT is mono-only (stereo is
+  downmixed), non-transient and uses a neutral non-dynalloc allocation. The
+  frame-size ceiling (`MAX_CELT_FRAME_BYTES`) is the RFC's own 1275-byte frame
+  limit — 510 kbps mono — over which bit-exactness against the reference decoder
+  is swept; requests above it are clamped rather than emitted. (Before 0.2.1 the
+  ceiling was 80 bytes ≈ 32 kbps, because a pulse-cache row was mis-indexed for
+  four-deep band splits, which only occur at higher rates.)
+  SILK is a genuine analysis-by-synthesis narrowband encoder (not silence) but
+  unvoiced-only with measured correlation ≈ 0.33–0.67.
+  `encode_opus_conformant` exposes explicit CELT/SILK/Hybrid mode selection with
+  the same caveats — **Hybrid's low band is still SILK silence**, so hybrid
+  carries no low-frequency audio and is never auto-selected;
+  `encode_opus_structural` preserves the pre-0.2.1 non-conformant byte layout
+  for compatibility. See the Format Support table footnote and the
+  `opus_encoder` module docs for the precise, measured fidelity picture.
 - Pure Rust default features (LAME FFI is opt-in only)

@@ -1,7 +1,20 @@
 # oxiaudio-encode TODO
 
 ## Status
-Pure Rust audio encoder crate. WAV encoder (hound-backed, F32/I16/I24/I32 bit depths) and FLAC encoder (flacenc-backed, 24-bit PCM, compression levels 0-8 with block_size mapping). Both one-shot (`AudioEncoder` trait) and streaming variants (`WavStreamEncoder` with `AudioSink` impl, `FlacStreamEncoder` with accumulated-flush approach). Conditional re-export of `LameMp3Encoder` via `mp3` feature. M0-M4 complete. Approximately 453 SLOC including tests.
+Pure Rust audio encoder crate. WAV encoder (hound-backed, F32/I16/I24/I32 bit depths) and FLAC encoder (flacenc-backed, 24-bit PCM, compression levels 0-8 with block_size mapping). Both one-shot (`AudioEncoder` trait) and streaming variants (`WavStreamEncoder` with `AudioSink` impl, `FlacStreamEncoder` with accumulated-flush approach). M0–M23 complete — the crate additionally writes AIFF/AIFF-C, AU/SND, RF64/BW64, OGG Vorbis,
+AAC-LC/M4A and OGG Opus, plus ID3v2.4 / APEv2 / Vorbis-comment metadata writers, TPDF and
+noise-shaped dithering, and two-pass EBU R128 normalization. The Opus encoder's **CELT** layer is
+RFC 6716 bit-exact — its `final_range` register matches the reference decoder's across the whole
+`[MIN_CELT_FRAME_BYTES, MAX_CELT_FRAME_BYTES]` = `[16, 1275]` range (hybrid is pinned separately
+over `[20, 1275]`) — but this is **not** a transparent-quality encoder: CELT is mono-only and
+non-transient, SILK is narrowband/unvoiced-only (measured correlation ≈ 0.33–0.67 against reference
+decode, evidenced by `tests/silk_internal_roundtrip.rs` bit-exactness rather than a `final_range`
+sweep), and hybrid's low band is still an inactive SILK silence frame. See the `opus_encoder` /
+`opus_celt` / `opus_silk_encode` module docs for the measured caveats. MP3 encoding is **not** here — it lives in the separate opt-in
+`oxiaudio-encode-mp3-lame` quarantine crate.
+14,786 SLOC of production code across 31 source files in `src/` (`tokei crates/oxiaudio-encode/src`,
+Code column, measured 2026-08-06); 367 tests passing with default features, 372 with
+`--all-features`.
 
 ## Core Implementation
 

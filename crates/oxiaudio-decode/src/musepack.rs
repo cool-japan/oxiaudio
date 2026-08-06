@@ -670,9 +670,39 @@ pub fn decode_musepack(data: &[u8]) -> Result<AudioBuffer<f32>, OxiAudioError> {
                 audio_data.len().saturating_div(100).min(10000)
             };
 
-            // Pre-allocate: each frame → FRAME_SAMPLES_STEREO f32 values
-            all_samples.reserve(n_frames * FRAME_SAMPLES_STEREO);
+            // Sanity-check `n_frames` (taken directly from the untrusted SV7 header's
+            // frame_count field) against the audio bytes actually present. An SV7
+            // frame can never be smaller than 1 byte, so a header claiming far more
+            // frames than there are bytes available is malformed; reject it instead
+            // of pre-allocating a reservation that could reach tens of gigabytes for
+            // a tiny/truncated file. `.max(10_000)` keeps small legitimate files
+            // (few bytes per declared frame due to silence/simplified encoding) from
+            // being rejected.
+            let max_plausible_frames = audio_data.len().saturating_add(1).max(10_000);
+            if n_frames > max_plausible_frames {
+                return Err(OxiAudioError::Decode(format!(
+                    "Musepack SV7: header claims {n_frames} frames but only {} bytes of \
+                     audio data are available",
+                    audio_data.len()
+                )));
+            }
 
+            // Deliberately NO up-front `reserve(n_frames * FRAME_SAMPLES_STEREO)`
+            // here. `n_frames` is an attacker-controlled header field bounded only
+            // by `max_plausible_frames` above, which still permits up to ~1
+            // declared frame per input byte (and a 10_000-frame floor for tiny/empty
+            // payloads). Pre-reserving `n_frames * FRAME_SAMPLES_STEREO` elements
+            // let a crafted file request a wildly disproportionate allocation before
+            // a single sample was decoded — e.g. a zero-byte audio payload with
+            // `frame_count = 9999` reserved ~92 MB, and a 1 MB payload could reserve
+            // ~9.2 GB (9216 bytes claimed per declared frame vs. 1 byte of backing
+            // data). The single-pass loop below can only ever append one frame's
+            // worth of samples in practice (it consumes all of `audio_data` on its
+            // first successful iteration and then breaks via the check below), so
+            // `extend_from_slice`'s ordinary amortized-growth reallocation is both
+            // sufficient and safe: capacity grows only in proportion to samples
+            // actually produced from real bytes, never in proportion to the
+            // untrusted header claim.
             for _ in 0..n_frames {
                 if frame_offset >= audio_data.len() {
                     break;
@@ -890,6 +920,51 @@ mod tests {
         let hdr = make_sv7_header(0, 1);
         let buf = decode_musepack(&hdr).expect("decode must succeed");
         assert_eq!(buf.channels, ChannelLayout::Stereo);
+    }
+
+    /// Regression test: an SV7 header claiming an enormous `frame_count` while
+    /// the file carries no (or almost no) audio data must be rejected with a
+    /// typed decode error rather than attempting a tens-of-gigabytes allocation.
+    #[test]
+    fn test_musepack_decode_sv7_huge_frame_count_rejected_not_oom() {
+        // frame_count = u32::MAX with zero bytes of trailing audio data.
+        let hdr = make_sv7_header(0, u32::MAX);
+        let result = decode_musepack(&hdr);
+        assert!(
+            matches!(result, Err(OxiAudioError::Decode(_))),
+            "huge frame_count with no audio data must be rejected with a Decode error"
+        );
+    }
+
+    /// Regression test: an SV7 header claiming a `frame_count` that still passes
+    /// the `max_plausible_frames` sanity check (i.e. is accepted, not rejected)
+    /// must NOT pre-allocate `frame_count * FRAME_SAMPLES_STEREO` elements up
+    /// front. With zero bytes of trailing audio data, `max_plausible_frames`
+    /// floors at 10_000, so `frame_count = 9999` is accepted; the old
+    /// unconditional `Vec::reserve(n_frames * FRAME_SAMPLES_STEREO)` would have
+    /// reserved ~92 MB (9999 × 2304 f32 elements = 23,037,696 elements) for a
+    /// 24-byte input — a ~3.8-million-times amplification.
+    #[test]
+    fn test_musepack_decode_sv7_accepted_frame_count_does_not_over_reserve() {
+        let hdr = make_sv7_header(0, 9999);
+        let buf = decode_musepack(&hdr)
+            .expect("decode must succeed (frame_count under the plausibility cap)");
+        // The single-pass SV7 decode loop can only ever produce output from bytes
+        // actually present (zero here), so no samples are produced and no large
+        // up-front capacity should have been reserved. 4096 is a generous ceiling
+        // — comfortably above any legitimate small-file output and orders of
+        // magnitude below the ~23-million-element reservation the old
+        // unconditional `reserve()` would have requested.
+        assert!(
+            buf.samples.capacity() < 4096,
+            "decode must not pre-reserve capacity proportional to the untrusted \
+             frame_count claim; got capacity {}",
+            buf.samples.capacity()
+        );
+        assert!(
+            buf.samples.is_empty(),
+            "zero-byte audio payload must decode to zero samples"
+        );
     }
 
     // ── QMF synthesis tests ───────────────────────────────────────────────────

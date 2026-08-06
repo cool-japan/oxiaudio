@@ -1,7 +1,14 @@
 # oxiaudio (facade) TODO
 
 ## Status
-User-facing facade crate composing oxiaudio-decode, oxiaudio-encode, and oxiaudio-dsp behind feature flags. Provides `decode_file`, `decode_file_f64`, `encode_wav`, `encode_flac`, `encode_stream`, `detect_format`, `decode_file_with_metadata`, streaming decode (`decode_stream`, `decode_stream_with_block_size`), and DSP convenience module (`dsp::resample`, `dsp::gain`, `dsp::normalize`, `dsp::trim_silence`, `dsp::mix_to_mono`, `dsp::pitch_shift`, `dsp::split_channels`, `dsp::BiquadFilter`, `dsp::ParametricEq`, `dsp::spectral::stft`, `dsp::spectral::melspectrogram`). Feature flags: `pure` (default), `serde`. M0-M4 complete. Criterion benchmarks in benches/facade_bench.rs.
+User-facing facade crate composing oxiaudio-decode, oxiaudio-encode, and oxiaudio-dsp behind feature flags. Provides `decode_file`, `decode_file_f64`, `encode_wav`, `encode_flac`, `encode_stream`, `detect_format`, `decode_file_with_metadata`, streaming decode (`decode_stream`, `decode_stream_with_block_size`), and DSP convenience module (`dsp::resample`, `dsp::gain`, `dsp::normalize`, `dsp::trim_silence`, `dsp::mix_to_mono`, `dsp::pitch_shift`, `dsp::split_channels`, `dsp::BiquadFilter`, `dsp::ParametricEq`, `dsp::spectral::stft`, `dsp::spectral::melspectrogram`). Feature flags: `pure` (default), `serde`. M0–M23 complete — also `TranscodeStream`, `DspChain`,
+`transcode_batch` parallel batch conversion, `convert_with_dsp`, `probe_metadata`/`write_metadata`,
+and the `decode_dsp_encode` / `streaming_transcode` runnable examples. MP3 *encoding* is
+deliberately absent: the facade has no `mp3-encode-lame` feature, so the default build stays
+100% Pure Rust.
+1,545 SLOC of production code across 5 source files in `src/` (`tokei crates/oxiaudio/src`,
+Code column, measured 2026-08-06); 78 tests passing with both default and `--all-features`.
+Criterion benchmarks in benches/facade_bench.rs.
 
 ## Core Implementation
 

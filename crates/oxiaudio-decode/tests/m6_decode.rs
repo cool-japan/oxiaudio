@@ -463,6 +463,26 @@ fn test_decode_aiff_bad_magic() {
     assert!(result.is_err());
 }
 
+/// Regression test: a COMM chunk claiming a huge `numSampleFrames` in a file
+/// whose SSND chunk actually contains almost no PCM data must be rejected
+/// with a typed decode error, not attempt a multi-gigabyte allocation.
+#[test]
+fn test_decode_aiff_huge_comm_frame_count_rejected_not_oom() {
+    // Build a minimal, otherwise-valid AIFF file with 1 real frame of PCM data.
+    let mut data = make_aiff_bytes_16bit(1, 44_100, 1);
+
+    // Overwrite the COMM chunk's numSampleFrames field (offset 22..26, big-endian
+    // u32; see make_aiff_bytes_16bit layout: FORM(12) + COMM header(8) + channels(2))
+    // with a value that would require ~34 GB of PCM data the file does not have.
+    data[22..26].copy_from_slice(&u32::MAX.to_be_bytes());
+
+    let result = decode_aiff(&mut std::io::Cursor::new(data));
+    assert!(
+        result.is_err(),
+        "huge COMM frame count with tiny SSND data must be rejected, not panic/OOM"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // §5  decode_raw_pcm
 // ═══════════════════════════════════════════════════════════════════════════════

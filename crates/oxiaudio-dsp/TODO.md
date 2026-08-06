@@ -1,7 +1,14 @@
 # oxiaudio-dsp TODO
 
 ## Status
-Pure Rust DSP crate. Implements resampling (rubato sinc SIMD), gain, channel utilities, normalize/trim_silence, STFT/iSTFT/mel-spectrogram (OxiFFT), pitch shifting, biquad filters (RBJ: lowpass, highpass, bandpass, notch, allpass, peaking EQ, low/high shelf), parametric EQ, dynamics (Compressor, Limiter, NoiseGate), time-domain effects (DelayLine, Chorus, Tremolo, Vibrato), spectral features (centroid, flux, rolloff, flatness, ZCR, MFCC), EBU R128 loudness (k_weight, loudness_integrated, true_peak). M0-M5 complete. Codebase split into modules: biquad, spectral, dynamics, effects, loudness. All AudioFilter traits implemented. Zero clippy warnings. 34 tests all passing.
+Pure Rust DSP crate. Implements resampling (rubato sinc SIMD), gain, channel utilities, normalize/trim_silence, STFT/iSTFT/mel-spectrogram (OxiFFT), pitch shifting, biquad filters (RBJ: lowpass, highpass, bandpass, notch, allpass, peaking EQ, low/high shelf), parametric EQ, dynamics (Compressor, Limiter, NoiseGate), time-domain effects (DelayLine, Chorus, Tremolo, Vibrato), spectral features (centroid, flux, rolloff, flatness, ZCR, MFCC), EBU R128 loudness (k_weight, loudness_integrated, true_peak). M0–M23 complete — additionally phase/channel vocoder, Butterworth/Chebyshev/Elliptic/FIR filters,
+expander/de-esser/multiband compressor, Freeverb + convolution reverb, YIN/pYIN pitch detection,
+onset/beat tracking, spectral subtraction + Wiener noise reduction, chroma/tonnetz/spectral-contrast
+features and EBU R128 / ReplayGain loudness. Codebase split into modules: biquad, spectral,
+dynamics, effects, loudness. All AudioFilter traits implemented. Zero clippy warnings.
+9,847 SLOC of production code across 21 source files in `src/` (`tokei crates/oxiaudio-dsp/src`,
+Code column, measured 2026-08-06); 196 tests passing with default features, 206 with
+`--all-features`.
 
 ## Core Implementation
 

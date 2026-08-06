@@ -5,12 +5,55 @@
 //!
 //! # Conformance note
 //!
-//! This encoder is structurally closer to RFC 6716 than the previous 4-bit
-//! placeholder, but is **not fully conformant**: PVQ is done with a greedy
-//! pulse allocator (not the exact combinatorial search in RFC 6716 §4.3.4.6),
-//! and the range coder is our private self-consistent variant rather than the
-//! RFC bit-reversal packing. The resulting bitstream will NOT be decoded
-//! by a standard Opus decoder.
+//! This default path (`encode_celt_frame` / `pvq_encode` /
+//! `quantize_band_energy`) is structurally closer to RFC 6716 than the previous
+//! 4-bit placeholder, but is **not fully conformant**: its PVQ shape selection
+//! is a greedy pulse allocator and its band-energy quantization is a 4-bit
+//! approximation, so a standard decoder will not accept it.
+//!
+//! The **conformant** path (`encode_celt_frame_conformant` /
+//! `encode_celt_body_into`) is decoder-verified. Its PVQ shape selection now
+//! uses the exact libopus rate-distortion search (`op_pvq_search`, maximising
+//! `<x,y>²/<y,y>`) together with the matching forward `exp_rotation`, and the
+//! resulting pulse vector is range-coded with the exact CWRS combinatorial
+//! index (RFC 6716 §4.3.4.6). The range coder itself is the RFC 6716 §4.1
+//! [`RangeEncoder`] (correct carry propagation and bit-reversal / raw-bit tail
+//! packing) shared by both paths — it is *not* a private variant.
+//!
+//! As of oxiaudio 0.2.1 the conformant path also implements:
+//!
+//! * **Real split-band (`itheta`) coding** (RFC 6716 §4.3.4.3) — the angle is
+//!   measured from the two half-bands' actual energies, quantised to `qn`
+//!   levels and range-coded with the triangular distribution, and *both* halves
+//!   are coded recursively. Previously `itheta` was pinned to 0, which zeroed
+//!   the upper half of every split band.
+//! * **Real fine-energy quantisation** (§4.3.2.1) — the coarse-energy residual
+//!   is refined with the allocator's per-band fine bits and the final ±½-LSB
+//!   pass, instead of writing zeros.
+//! * **Lapped MDCT analysis with overlap history and CELT pre-emphasis**, so
+//!   the decoder's overlap-add and de-emphasis are actually inverted. See
+//!   `crate::opus_mdct`.
+//!
+//! Measured against the reference decoder, per-band energy is now reproduced
+//! within ≈1 dB and the encoder's `final_range` matches the decoder's for every
+//! frame size in `[MIN_CELT_FRAME_BYTES, MAX_CELT_FRAME_BYTES]` — the canonical
+//! libopus conformance check. As of oxiaudio 0.2.1 that upper bound is the
+//! RFC's own 1275-byte frame limit (510 kbps mono) rather than the 80 bytes
+//! (≈32 kbps) the previous wave could prove; see [`MAX_CELT_FRAME_BYTES`] for
+//! the root cause of the old ceiling. Remaining scope limits are mono-only
+//! coding (stereo input is downmixed), no transient/TF adaptation and no
+//! dynamic allocation.
+//!
+//! # Verification instruments
+//!
+//! [`encode_celt_frame_conformant_traced`] returns a [`CeltEncodeTrace`] whose
+//! `stage_tells` mirror the field order and names
+//! [`crate::opus_celt_verify::parse_celt_frame`] records, so a desynchronisation
+//! can be bisected to a coding stage instead of only showing up as a mismatched
+//! `final_range` at the end of the frame. The trace also reports whether the
+//! range-coded (front) and raw-bit (back) halves physically fitted the packet —
+//! a check `final_range` alone cannot make, because dropping a raw-bit byte
+//! never touches the range register.
 //!
 //! # CELT Band Layout (RFC 6716 Table 1)
 //!
@@ -24,32 +67,14 @@
 //! (Remaining bins 100..480 are treated as trailing high-frequency content.)
 //! ```
 
-use crate::opus_celt_tables::{
-    BAND_ALLOCATION, CACHE_BITS_50, CACHE_CAPS_50, CACHE_INDEX_50, EBAND_5MS, E_MEANS,
-    E_PROB_MODEL, NUM_BANDS_CELT,
+use crate::opus_celt_bands::{encode_band_with_splits, BandEncCtx, BandEncSink};
+use crate::opus_celt_rate::{
+    celt_compute_allocation_enc, celt_init_caps, SkipBitEncoder, BITRES, MAX_FINE_BITS,
 };
+use crate::opus_celt_tables::{EBAND_5MS, E_MEANS, E_PROB_MODEL, NUM_BANDS_CELT};
 use crate::opus_mdct::mdct_forward;
 use crate::opus_pvq;
 use crate::opus_range::{ec_laplace_encode, RangeEncoder};
-
-// BITRES = 3 (Q3 fixed-point scale for bit counts), matching libopus CELT.
-const BITRES: i32 = 3;
-// Number of allocation levels in BAND_ALLOCATION.
-const NB_ALLOC_VECTORS: usize = 11;
-// Maximum fine-quant bits per band.
-const MAX_FINE_BITS: i32 = 8;
-// Fine-offset for energy allocation.
-const FINE_OFFSET: i32 = 21;
-// Number of bisection steps in interp_bits2pulses.
-const ALLOC_STEPS: i32 = 6;
-// Theta offset for band splitting (from libopus `celt/bands.c`).
-const QTHETA_OFFSET: i32 = 4;
-// 2^(x/8) fixed-point table used by compute_qn (from libopus `celt/bands.c`).
-const EXP2_TABLE8: [i32; 8] = [16384, 17866, 19483, 21247, 23170, 25267, 27554, 30048];
-// log2_frac table for intensity stereo (unused for mono but needed structurally).
-const LOG2_FRAC_TABLE: [u8; 24] = [
-    0, 8, 13, 16, 19, 21, 23, 24, 26, 27, 28, 29, 30, 31, 32, 32, 33, 34, 34, 35, 36, 36, 37, 37,
-];
 
 /// Number of CELT frequency bands (RFC 6716, Table 1).
 pub const NUM_BANDS: usize = 21;
@@ -231,33 +256,242 @@ pub fn encode_celt_frame_pvq(
 ///
 /// Rate-allocation logic ported from libopus `celt/rate.c` and `celt/celt.c`
 /// (Xiph.Org Foundation, BSD-3-Clause).
-pub fn encode_celt_frame_conformant(pcm: &[f32], _channels: usize) -> Vec<u8> {
+pub fn encode_celt_frame_conformant(pcm: &[f32], channels: usize) -> Vec<u8> {
+    encode_celt_frame_conformant_with_history(&[], pcm, channels)
+}
+
+/// Encode one RFC 6716–conformant CELT-only mono 20 ms Opus frame **with MDCT
+/// overlap history**.
+///
+/// CELT's MDCT is a *lapped* transform: the analysis block for frame `t` spans
+/// the previous frame and the current frame, and the decoder reconstructs each
+/// output frame by overlap-adding two consecutive inverse transforms. Encoding
+/// every frame as if it were preceded by silence (which is what
+/// [`encode_celt_frame_conformant`] does when called with no history) breaks
+/// time-domain alias cancellation and leaves large audible aliasing in the
+/// reconstruction.
+///
+/// Pass the previous 960-sample frame as `prev` (an empty slice for the first
+/// frame of a stream) and the frame being coded as `cur`.
+///
+/// # Arguments
+///
+/// * `prev`     — previous 960-sample mono frame, or `&[]` at stream start.
+/// * `cur`      — the 960-sample mono frame to encode (zero-padded if shorter).
+/// * `channels` — accepted for API symmetry; the conformant CELT path is mono.
+pub fn encode_celt_frame_conformant_with_history(
+    prev: &[f32],
+    cur: &[f32],
+    channels: usize,
+) -> Vec<u8> {
+    let _ = channels;
+    encode_celt_frame_conformant_sized(prev, cur, DEFAULT_CELT_FRAME_BYTES)
+}
+
+/// Default CELT payload size in bytes per 20 ms frame (≈ 25.6 kbps mono).
+pub const DEFAULT_CELT_FRAME_BYTES: usize = 64;
+
+/// Smallest CELT payload the conformant writer will emit (≈ 6.4 kbps).
+pub const MIN_CELT_FRAME_BYTES: usize = 16;
+
+/// Largest CELT payload this encoder will emit for a single 20 ms frame.
+///
+/// This is the RFC 6716 §3.2.1 **frame** limit: an Opus frame length field
+/// represents at most `255·4 + 255 = 1275` bytes, so a code-0 (single-frame)
+/// packet is at most `1 + 1275 = 1276` bytes including its TOC byte. At 20 ms
+/// that is 510 kbps mono — the maximum rate Opus can express.
+///
+/// The cap is a *conformance* bound, not a taste bound: the encoder's
+/// `final_range` register is checked against the reference decoder's over the
+/// whole `[MIN_CELT_FRAME_BYTES, MAX_CELT_FRAME_BYTES]` range on a corpus that
+/// includes full-scale white noise, near-silence, pure tones from 120 Hz to
+/// 19 kHz, an impulse train and digital silence
+/// (`tests/m_opus_celt_snr.rs::celt_final_range_matches_reference_across_sizes`).
+///
+/// Before oxiaudio 0.2.1 this constant was 80 (≈32 kbps) because frames above
+/// ≈90 bytes desynchronised from the reference decoder for reasons that had not
+/// been identified. The cause was
+/// [`celt_bits2pulses`](crate::opus_celt_rate) clamping the *partition* scale
+/// `lm` to 0 before indexing the pulse cache: a band that splits four times
+/// (band 20 at LM = 3 goes 176 → 88 → 44 → 22 → 11 bins) reaches `lm = -1`,
+/// which must select cache row 0, and only high-rate frames split that deeply.
+pub const MAX_CELT_FRAME_BYTES: usize = 1275;
+
+/// Convert a target bitrate to a CBR payload size for one 20 ms CELT frame.
+///
+/// `bytes = kbps · 1000 · 0.02 / 8 = kbps · 2.5`, clamped to
+/// `[MIN_CELT_FRAME_BYTES, MAX_CELT_FRAME_BYTES]`. The TOC byte is *not*
+/// included (it is added by the frame writer), so a 64 kbps request yields a
+/// 160-byte payload and a 161-byte packet, and anything at or above 510 kbps
+/// saturates at the RFC's 1275-byte frame limit.
+pub fn celt_frame_bytes_for_bitrate(target_bitrate_kbps: u32) -> usize {
+    let bytes = (target_bitrate_kbps as usize).saturating_mul(5) / 2;
+    bytes.clamp(MIN_CELT_FRAME_BYTES, MAX_CELT_FRAME_BYTES)
+}
+
+/// Encode one conformant CELT-only mono 20 ms frame at an explicit payload size.
+///
+/// `target_bytes` is the CBR payload length in bytes, excluding the TOC byte;
+/// it is clamped to `[MIN_CELT_FRAME_BYTES, MAX_CELT_FRAME_BYTES]`. Larger
+/// frames give the rate allocator more pulses per band and therefore higher
+/// reconstruction SNR — see `tests/m_opus_celt_snr.rs` for measured figures.
+pub fn encode_celt_frame_conformant_sized(
+    prev: &[f32],
+    cur: &[f32],
+    target_bytes: usize,
+) -> Vec<u8> {
+    encode_celt_frame_conformant_ranged(prev, cur, target_bytes).0
+}
+
+/// [`encode_celt_frame_conformant_sized`] plus the range coder's **final range**.
+///
+/// The final range register (`OPUS_GET_FINAL_RANGE`) is the canonical libopus
+/// conformance check: an encoder and a decoder that consumed exactly the same
+/// symbol sequence end with identical `rng`. Any desynchronisation — a missing
+/// header flag, a wrong `itheta` layout, an off-by-one in the rate allocator —
+/// changes it. `tests/m_opus_celt_conformance.rs` asserts it against the
+/// reference decoder for a signal corpus at several frame sizes.
+pub fn encode_celt_frame_conformant_ranged(
+    prev: &[f32],
+    cur: &[f32],
+    target_bytes: usize,
+) -> (Vec<u8>, u32) {
+    // A near-full CBR frame can overflow its own packet by a byte or two when
+    // the range-coded stream (front) and the raw-bit stream (back) meet; see
+    // `RangeEncoder::finish_to_size_checked`. Shrinking the frame is always
+    // safe because the decoder derives its bit budget from the emitted packet
+    // length, so a smaller frame is simply a lower-rate — still exactly
+    // conformant — encode of the same audio.
+    let mut bytes = target_bytes.clamp(MIN_CELT_FRAME_BYTES, MAX_CELT_FRAME_BYTES);
+    loop {
+        let (packet, range, fits) = encode_celt_frame_try(prev, cur, bytes);
+        if fits || bytes <= MIN_CELT_FRAME_BYTES {
+            return (packet, range);
+        }
+        bytes -= 1;
+    }
+}
+
+/// Encoder-side counterpart of
+/// [`CeltFrameParse`](crate::opus_celt_verify::CeltFrameParse).
+///
+/// The verifier records the range-coder position (Q3) after every named stage
+/// of a CELT frame so a desynchronisation can be bisected to a stage instead of
+/// showing up only as a mismatched `final_range` at the very end. That is only
+/// half an instrument: without the *encoder's* positions there is nothing to
+/// compare the verifier's against.
+///
+/// [`encode_celt_frame_conformant_traced`] fills this in with the same stage
+/// names, in the same order, so
+/// `trace.stage_tells == parse_celt_frame(..).stage_tells` is a per-stage
+/// equality check. It also records the PVQ statistics that bound the coder's
+/// dynamic range (largest `K` reaching a leaf, and how many leaves saw `V(N,K)`
+/// wrap `u32`).
+#[derive(Debug, Clone, Default)]
+pub struct CeltEncodeTrace {
+    /// Range-coder position (Q3) after each named stage.
+    pub stage_tells: Vec<(&'static str, u32)>,
+    /// Number of PVQ leaves coded (recursive splits included).
+    pub pvq_leaves: usize,
+    /// Number of `itheta` split-angle symbols written.
+    pub theta_symbols: usize,
+    /// Largest pulse count `K` handed to a single PVQ leaf.
+    pub max_leaf_pulses: u32,
+    /// Number of leaves whose `V(N, K)` wrapped `u32`.
+    ///
+    /// The decoder has no wide path either, so a wrap costs reconstruction
+    /// accuracy for that leaf but does **not** desynchronise the bitstream —
+    /// both sides code the symbol over the same wrapped total.
+    pub pvq_index_overflows: usize,
+    /// Deepest (most negative) partition scale reached by the split recursion.
+    ///
+    /// Reaches `-1` on wide bands at high rates; that partition must index
+    /// pulse-cache row 0.
+    pub min_partition_lm: i32,
+    /// `false` when the range-coded (front) and raw-bit (back) halves collided
+    /// and bytes had to be dropped to hit the target size.
+    pub fits: bool,
+    /// Emitted payload length in bytes, excluding the TOC byte.
+    pub payload_len: usize,
+    /// Encoder `final_range` register (`OPUS_GET_FINAL_RANGE`).
+    pub final_range: u32,
+}
+
+/// [`encode_celt_frame_conformant_ranged`] plus a full per-stage encoder trace.
+///
+/// `target_bytes` is used **verbatim**: it is not clamped to
+/// `[MIN_CELT_FRAME_BYTES, MAX_CELT_FRAME_BYTES]` and no shrink-retry is
+/// performed, so the caller sees exactly one encode attempt at exactly the
+/// requested size. This is what the conformance sweep needs in order to prove
+/// where the bit-exactness bound actually lies rather than measuring the
+/// clamp.
+///
+/// Returns `(packet, trace)`; `packet[0]` is the TOC byte and `packet[1..]` is
+/// the `target_bytes`-long payload.
+pub fn encode_celt_frame_conformant_traced(
+    prev: &[f32],
+    cur: &[f32],
+    target_bytes: usize,
+) -> (Vec<u8>, CeltEncodeTrace) {
+    let (packet, _range, _fits, trace) = encode_celt_frame_try_traced(prev, cur, target_bytes);
+    (packet, trace)
+}
+
+/// One CELT encode attempt at an exact payload size.
+///
+/// Returns `(packet, final_range, fits)`; `fits == false` means the two halves
+/// of the range-coder stream collided and the packet had to drop bytes.
+///
+/// `target_bytes` is used verbatim (no clamping) — the caller is responsible
+/// for keeping it inside `[MIN_CELT_FRAME_BYTES, MAX_CELT_FRAME_BYTES]`.
+fn encode_celt_frame_try(prev: &[f32], cur: &[f32], target_bytes: usize) -> (Vec<u8>, u32, bool) {
+    let (packet, range, fits, _trace) = encode_celt_frame_try_traced(prev, cur, target_bytes);
+    (packet, range, fits)
+}
+
+/// [`encode_celt_frame_try`] with the stage trace retained.
+fn encode_celt_frame_try_traced(
+    prev: &[f32],
+    cur: &[f32],
+    target_bytes: usize,
+) -> (Vec<u8>, u32, bool, CeltEncodeTrace) {
     // Config 31 = CELT-only, Fullband (20 kHz), 20 ms = 960 samples @ 48 kHz.
     // TOC byte: (31 << 3) | stereo=0 | code=0 = 0xF8.
     const TOC: u8 = 0xF8;
     const LM: usize = 3;
-    // Target 64 active bytes = 512 total range-coder bits.
-    const TARGET_ACTIVE_BYTES: usize = 64;
-    const TARGET_BITS: i32 = TARGET_ACTIVE_BYTES as i32 * 8;
+    let active_bytes = target_bytes.max(1);
+    let target_bits = active_bytes as i32 * 8;
 
-    use crate::opus_mdct::{celt_mdct_960, FRAME_SIZE};
-    let mono: Vec<f32> = if pcm.len() >= FRAME_SIZE {
-        pcm[..FRAME_SIZE].to_vec()
+    use crate::opus_mdct::{celt_analysis_spectrum, FRAME_SIZE};
+    let mono: Vec<f32> = if cur.len() >= FRAME_SIZE {
+        cur[..FRAME_SIZE].to_vec()
     } else {
-        let mut v = pcm.to_vec();
+        let mut v = cur.to_vec();
         v.resize(FRAME_SIZE, 0.0);
         v
     };
-    let celt_spec = celt_mdct_960(&mono);
+    let history: Vec<f32> = if prev.len() >= FRAME_SIZE {
+        prev[prev.len() - FRAME_SIZE..].to_vec()
+    } else {
+        let mut v = vec![0.0f32; FRAME_SIZE - prev.len()];
+        v.extend_from_slice(prev);
+        v
+    };
+    let celt_spec = celt_analysis_spectrum(&history, &mono);
 
     let mut enc = RangeEncoder::new();
-    encode_celt_body_into(&celt_spec, 0, true, TARGET_BITS, LM, &mut enc);
+    let mut trace = CeltEncodeTrace::default();
+    encode_celt_body_into(&celt_spec, 0, true, target_bits, LM, &mut enc, &mut trace);
 
-    let frame_bytes = enc.finish_to_size(TARGET_ACTIVE_BYTES);
+    let final_range = enc.final_range();
+    let (frame_bytes, fits) = enc.finish_to_size_checked(active_bytes);
+    trace.final_range = final_range;
+    trace.fits = fits;
+    trace.payload_len = frame_bytes.len();
     let mut packet = Vec::with_capacity(1 + frame_bytes.len());
     packet.push(TOC);
     packet.extend_from_slice(&frame_bytes);
-    packet
+    (packet, final_range, fits, trace)
 }
 
 /// Encode the CELT high-band layer (bands `start_band`..21) into an existing
@@ -277,17 +511,31 @@ pub fn encode_celt_frame_conformant(pcm: &[f32], _channels: usize) -> Vec<u8> {
 /// coarse energy, TF, spread, dynalloc, trim, allocation, fine energy and PVQ
 /// shapes for bands `start_band`..21.
 ///
+/// # Bit budget
+///
+/// `target_bytes` must be the length the **whole shared packet payload** will
+/// have once [`RangeEncoder::finish_to_size_checked`] pads it, because the
+/// decoder derives `total_bits = frame.len() * 8` from exactly that length and
+/// both layers count bits from the start of the shared stream. Passing a
+/// constant here while assembling the packet with a variable-length
+/// [`RangeEncoder::finish`] — which is what this function did before oxiaudio
+/// 0.2.1 — makes the decoder's `total_bits` differ from the encoder's whenever
+/// the natural length is not exactly that constant, and the two sides then
+/// disagree about the rate allocation. `encode_hybrid_frame_conformant` now
+/// passes its CBR target and finishes to that exact size.
+///
 /// # CELT layer uses `start_band=17` and omits silence flag — decoder returns `Ok(960)`.
-pub(crate) fn encode_celt_hybrid_layer_into(pcm: &[f32], enc: &mut RangeEncoder) {
-    // Same 64-byte / 512-bit target as the CELT-only path. The decoder computes
-    // `total_bits = frame.len() * 8` from the full shared frame, so we pass the
-    // same `TARGET_BITS` budget; the decoder's bit accounting is consistent because
-    // both encoder and decoder count bits from the start of the shared stream.
-    const TARGET_BITS_HYBRID: i32 = 512; // 64 bytes × 8
+pub(crate) fn encode_celt_hybrid_layer_into(
+    pcm: &[f32],
+    target_bytes: usize,
+    enc: &mut RangeEncoder,
+    trace: &mut CeltEncodeTrace,
+) {
     const LM: usize = 3;
+    // First CELT band carried by a hybrid packet (8 kHz crossover).
     const START_BAND_HYBRID: usize = 17;
 
-    use crate::opus_mdct::{celt_mdct_960, FRAME_SIZE};
+    use crate::opus_mdct::{celt_analysis_spectrum, FRAME_SIZE};
     let mono: Vec<f32> = if pcm.len() >= FRAME_SIZE {
         pcm[..FRAME_SIZE].to_vec()
     } else {
@@ -295,15 +543,20 @@ pub(crate) fn encode_celt_hybrid_layer_into(pcm: &[f32], enc: &mut RangeEncoder)
         v.resize(FRAME_SIZE, 0.0);
         v
     };
-    let celt_spec = celt_mdct_960(&mono);
+    // The hybrid entry point is stateless, so the lapped MDCT sees a zero
+    // history here (documented on `encode_hybrid_frame_conformant`). Pre-emphasis
+    // and the analysis gain are applied exactly as on the CELT-only path so the
+    // two layers share one coefficient domain.
+    let celt_spec = celt_analysis_spectrum(&[], &mono);
 
     encode_celt_body_into(
         &celt_spec,
         START_BAND_HYBRID,
         false, // no silence flag in hybrid mode
-        TARGET_BITS_HYBRID,
+        (target_bytes as i32).saturating_mul(8),
         LM,
         enc,
+        trace,
     );
 }
 
@@ -322,6 +575,8 @@ pub(crate) fn encode_celt_hybrid_layer_into(pcm: &[f32], enc: &mut RangeEncoder)
 ///   `total_bits = active_len * 8`; using the same value keeps allocation in sync.
 /// * `lm`                 — Frame-size log-scale (3 for 20 ms / 960 samples at 48 kHz).
 /// * `enc`                — Range encoder to write into (may already contain SILK bits).
+/// * `trace`              — Per-stage bit positions and PVQ statistics; see
+///   [`CeltEncodeTrace`].
 fn encode_celt_body_into(
     celt_spec: &[f32],
     start_band: usize,
@@ -329,8 +584,10 @@ fn encode_celt_body_into(
     target_bits: i32,
     lm: usize,
     enc: &mut RangeEncoder,
+    trace: &mut CeltEncodeTrace,
 ) {
     let target_bits_q = target_bits << BITRES;
+    trace.min_partition_lm = lm as i32;
 
     // ── 2. Per-band energies (log2 scale) ─────────────────────────────────────
     let band_log2 = celt_band_log2_energies(celt_spec, lm);
@@ -342,33 +599,42 @@ fn encode_celt_body_into(
     if write_silence_flag {
         enc.enc_bit_logp(false, 15);
     }
+    trace.stage_tells.push(("silence", enc.tell_frac()));
 
     // Post-filter flag (logp=1): only when start_band == 0 (pure CELT).
     // The hybrid decoder skips this because start != 0.
     if start_band == 0 && enc.tell() + 16 <= target_bits {
         enc.enc_bit_logp(false, 1);
     }
+    trace.stage_tells.push(("postfilter", enc.tell_frac()));
 
     // Transient flag (logp=3): written when lm>0 && budget allows.
     if lm > 0 && enc.tell() + 3 <= target_bits {
         enc.enc_bit_logp(false, 3); // not transient
     }
+    trace.stage_tells.push(("transient", enc.tell_frac()));
 
     // Intra energy flag (logp=3): write true (intra mode for first frame).
     if enc.tell() + 3 <= target_bits {
         enc.enc_bit_logp(true, 3);
     }
+    trace.stage_tells.push(("intra", enc.tell_frac()));
 
     // ── 4. Coarse energy ──────────────────────────────────────────────────────
-    celt_quant_coarse_energy_intra_ranged(&band_log2, start_band, lm, target_bits, enc);
+    // `error[i]` is the residual the fine-energy pass below refines.
+    let mut error =
+        celt_quant_coarse_energy_intra_ranged(&band_log2, start_band, lm, target_bits, enc);
+    trace.stage_tells.push(("coarse", enc.tell_frac()));
 
     // ── 5. TF (neutral: all unchanged, non-transient) ────────────────────────
     celt_write_tf_neutral_ranged(start_band, lm, false, target_bits, enc);
+    trace.stage_tells.push(("tf", enc.tell_frac()));
 
     // ── 6. Spread decision (SPREAD_NORMAL = symbol 2) ─────────────────────────
     if enc.tell() + 4 <= target_bits {
         enc.enc_icdf(2, &crate::opus_celt_tables::SPREAD_ICDF, 5);
     }
+    trace.stage_tells.push(("spread", enc.tell_frac()));
 
     // ── 7. Dynamic allocation boosts (none) ───────────────────────────────────
     let cap = celt_init_caps(lm);
@@ -381,6 +647,7 @@ fn encode_celt_body_into(
             tell_q = enc.tell_frac() as i32;
         }
     }
+    trace.stage_tells.push(("dynalloc", enc.tell_frac()));
 
     // ── 8. Allocation trim (neutral = symbol 5) ───────────────────────────────
     tell_q = enc.tell_frac() as i32;
@@ -391,26 +658,52 @@ fn encode_celt_body_into(
     } else {
         5i32
     };
+    trace.stage_tells.push(("trim", enc.tell_frac()));
 
     // ── 9. Rate allocation ────────────────────────────────────────────────────
     let avail_bits = (target_bits_q - tell_q - 1).max(0);
-    let alloc =
-        celt_compute_allocation_enc(enc, avail_bits, &offsets, &cap, alloc_trim, lm, start_band);
+    let alloc = celt_compute_allocation_enc(
+        &mut SkipBitEncoder(enc),
+        avail_bits,
+        &offsets,
+        &cap,
+        alloc_trim,
+        lm,
+        start_band,
+    );
+    trace.stage_tells.push(("alloc", enc.tell_frac()));
 
-    // ── 10. Fine energy (written to END stream as zeros) ─────────────────────
-    for i in start_band..NUM_BANDS_CELT {
+    // ── 10. Fine energy (raw bits at the END of the stream) ──────────────────
+    // Mirrors `quant_fine_energy` in libopus `celt/quant_bands.c`. The decoder
+    // adds `(q2 + ½)·2^-ebits − ½` to the coarse energy, so the encoder picks
+    // the `q2` that best cancels the coarse residual and subtracts the applied
+    // offset from `error[i]` for the finalise pass below.
+    //
+    // Before oxiaudio 0.2.1 these bits were written as zeros, which pinned
+    // every band's energy correction to `−½ + 2^-(ebits+1)` log2 units — an
+    // up to −0.5 log2 (≈ −3 dB) systematic error on every single band.
+    for (i, err) in error
+        .iter_mut()
+        .enumerate()
+        .take(NUM_BANDS_CELT)
+        .skip(start_band)
+    {
         let ebits = alloc.fine_quant[i];
-        if ebits > 0 {
-            enc.enc_bits(0, ebits as u32);
+        if ebits <= 0 {
+            continue;
         }
+        let frac = (1i32 << ebits) as f32;
+        let q2 = (((*err + 0.5) * frac).floor() as i32).clamp(0, (1 << ebits) - 1);
+        enc.enc_bits(q2 as u32, ebits as u32);
+        let offset = (q2 as f32 + 0.5) / frac - 0.5;
+        *err -= offset;
     }
+    trace.stage_tells.push(("fine", enc.tell_frac()));
 
     // ── 11. PVQ band shapes ───────────────────────────────────────────────────
-    // Mirror the decoder's `quant_all_bands_mono` balance-tracking loop exactly.
-    //
-    // For bands where the decoder would split (b > cache_max + 12), we call
-    // `encode_band_with_splits`, which writes the theta symbol (itheta=0) and
-    // recurses on the lower-frequency half only.
+    // Mirror the decoder's `quant_all_bands_mono` balance-tracking loop exactly,
+    // then hand each band to `encode_band_with_splits`, which reproduces
+    // `quant_partition_mono`'s recursive split (real `itheta` angle coding).
     //
     // Mirrors `quant_all_bands_mono` / `quant_partition_mono` in libopus
     // `celt/bands.c` (BSD-3-Clause).
@@ -436,32 +729,43 @@ fn encode_celt_body_into(
         let celt_lo = (EBAND_5MS[band] as usize) * celt_scale;
         let width = (EBAND_5MS[band + 1] - EBAND_5MS[band]) as usize;
         let n0 = width << lm;
-        let mut rem_bits_band = remaining_bits;
-        let band_ctx = BandEncCtx {
-            celt_spec,
-            band,
-            celt_lo,
+        let band_ctx = BandEncCtx { celt_spec, band };
+        let mut sink = BandEncSink {
+            enc,
+            trace,
+            remaining_bits,
         };
-        encode_band_with_splits(&band_ctx, lm as i32, b, &mut rem_bits_band, enc, n0);
+        encode_band_with_splits(&band_ctx, &mut sink, celt_lo, n0, lm as i32, b);
         balance += alloc.pulses[band] + tell;
     }
+    trace.stage_tells.push(("bands", enc.tell_frac()));
 
-    // ── 12. Finalise energy (extra fine bits, END stream) ────────────────────
-    // Mirror decoder's `quant_fine_energy` finalize pass.
-    let bits_left_for_finalise = target_bits - enc.tell();
-    if bits_left_for_finalise > 0 {
-        'outer: for prio in 0..2i32 {
-            for i in start_band..NUM_BANDS_CELT {
-                if alloc.fine_quant[i] >= MAX_FINE_BITS || alloc.fine_priority[i] != prio {
-                    continue;
-                }
-                if target_bits - enc.tell() <= 0 {
-                    break 'outer;
-                }
-                enc.enc_bits(0, 1);
+    // ── 12. Finalise energy (extra ±½-LSB fine bits, END stream) ─────────────
+    // Mirrors `quant_energy_finalise`: the decoder adds
+    // `(q2 − ½)·2^-(fine_quant+1)`, so writing `1` when the residual is still
+    // positive and `0` when it is negative halves the remaining error.
+    let mut bits_left = target_bits - enc.tell();
+    'outer: for prio in 0..2i32 {
+        for (i, err) in error
+            .iter_mut()
+            .enumerate()
+            .take(NUM_BANDS_CELT)
+            .skip(start_band)
+        {
+            if bits_left < 1 {
+                break 'outer;
             }
+            if alloc.fine_quant[i] >= MAX_FINE_BITS || alloc.fine_priority[i] != prio {
+                continue;
+            }
+            let q2 = u32::from(*err >= 0.0);
+            enc.enc_bits(q2, 1);
+            let offset = (q2 as f32 - 0.5) / ((1i64 << (alloc.fine_quant[i] + 1)) as f32);
+            *err -= offset;
+            bits_left -= 1;
         }
     }
+    trace.stage_tells.push(("finalise", enc.tell_frac()));
 }
 
 // ── Conformant CELT helpers (ported from libopus, BSD-3-Clause) ──────────────
@@ -481,6 +785,14 @@ fn encode_celt_body_into(
 /// For each CELT band `i` at frame-level `lm`, the coefficient range is
 /// `[EBAND_5MS[i] * (1<<lm), EBAND_5MS[i+1] * (1<<lm))`.  At LM=3 this
 /// gives 8-coefficient-wide bands matching the decoder's `denormalise_bands`.
+///
+/// The value returned is `log2(‖band‖₂)` — the **L2 norm**, matching libopus
+/// `compute_band_energies` (`bandE[i] = sqrt(Σ X[j]²)`) and the decoder's
+/// `denormalise_bands`, which multiplies a *unit-norm* band shape by
+/// `2^(band_loge[i] + E_MEANS[i])`. Using an RMS (`sqrt(Σ/N)`) here instead
+/// would attenuate every band by `sqrt(N_i)` — a per-band error of up to
+/// 13× at LM=3 — because wider bands would be scaled down harder than
+/// narrow ones.
 fn celt_band_log2_energies(celt_spec: &[f32], lm: usize) -> Vec<f32> {
     let n_coeff = celt_spec.len();
     let m = 1usize << lm; // = 8 at LM=3
@@ -492,9 +804,9 @@ fn celt_band_log2_energies(celt_spec: &[f32], lm: usize) -> Vec<f32> {
                 return -9.0f32;
             }
             let energy: f32 = celt_spec[lo..hi].iter().map(|&x| x * x).sum();
-            let rms = (energy / ((hi - lo).max(1) as f32)).sqrt();
-            if rms > 1e-20 {
-                rms.log2()
+            let norm = energy.sqrt();
+            if norm > 1e-20 {
+                norm.log2()
             } else {
                 -9.0f32
             }
@@ -511,6 +823,12 @@ fn celt_band_log2_energies(celt_spec: &[f32], lm: usize) -> Vec<f32> {
 /// When `start_band = 0` this encodes all 21 bands (CELT-only path).
 /// When `start_band = 17` this encodes only bands 17–20 (hybrid CELT path).
 ///
+/// # Returns
+///
+/// The per-band coarse residual `error[i] = target_i − qi_i` (log2 units, in
+/// `[−0.5, 0.5]` whenever `qi` was not clamped), which the fine-energy pass
+/// refines. Bands below `start_band` carry `0.0`.
+///
 /// Mirrors `quant_coarse_energy` in libopus `celt/quant_bands.c` (BSD-3-Clause).
 fn celt_quant_coarse_energy_intra_ranged(
     band_log2: &[f32],
@@ -518,37 +836,55 @@ fn celt_quant_coarse_energy_intra_ranged(
     lm: usize,
     total_bits: i32,
     enc: &mut RangeEncoder,
-) {
+) -> Vec<f32> {
     use crate::opus_celt_tables::{BETA_INTRA, SMALL_ENERGY_ICDF};
     let prob_model = &E_PROB_MODEL[lm][1];
     let mut prev = 0.0f32;
+    let mut error = vec![0.0f32; NUM_BANDS_CELT];
 
-    for i in start_band..NUM_BANDS_CELT {
+    for (i, err) in error
+        .iter_mut()
+        .enumerate()
+        .take(NUM_BANDS_CELT)
+        .skip(start_band)
+    {
         let tell = enc.tell();
         let target = band_log2[i] - E_MEANS[i.min(24)] - prev;
-        let qi = (target.round() as i32).clamp(-128, 127);
+        // The decoder clamps its reconstruction to [-28, 28]; keep `qi` inside a
+        // range the Laplace coder represents and mirror the clamp in `error`.
+        let qi = (target.round() as i32).clamp(-28, 28);
 
-        if total_bits - tell >= 15 {
+        // `qi_coded` is what the decoder will reconstruct: the Laplace coder
+        // clamps large magnitudes, and the low-budget fallbacks only represent
+        // {-1, 0, +1}. Everything downstream (the `prev` chain and the
+        // fine-energy residual) must track the *coded* value, not the request.
+        let qi_coded = if total_bits - tell >= 15 {
             let pi = 2 * i.min(20);
             let fs = (prob_model[pi] as u32) << 7;
             let decay = (prob_model[pi + 1] as u32) << 6;
-            ec_laplace_encode(enc, qi, fs, decay);
+            ec_laplace_encode(enc, qi, fs, decay)
         } else if total_bits - tell >= 2 {
-            let s = if qi == 0 {
-                0
-            } else if qi < 0 {
-                1
-            } else {
-                2
+            let s = match qi.cmp(&0) {
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Less => 1,
+                std::cmp::Ordering::Greater => 2,
             };
             enc.enc_icdf(s, &SMALL_ENERGY_ICDF, 2);
+            qi.signum()
         } else if total_bits - tell >= 1 {
             enc.enc_bit_logp(qi < 0, 1);
-        }
+            -i32::from(qi < 0)
+        } else {
+            // Out of budget: the decoder assumes qi = -1 without reading.
+            -1
+        };
+
+        *err = target - qi_coded as f32;
 
         // Mirror decoder's prev accumulation: prev += qi * (1 - BETA_INTRA).
-        prev += qi as f32 * (1.0 - BETA_INTRA);
+        prev += qi_coded as f32 * (1.0 - BETA_INTRA);
     }
+    error
 }
 
 /// Write neutral TF decisions for bands `start_band`..`NUM_BANDS_CELT`.
@@ -597,694 +933,6 @@ fn celt_write_tf_neutral_ranged(
         && TF_SELECT_TABLE[lm][idx0] != TF_SELECT_TABLE[lm][idx1]
     {
         enc.enc_bit_logp(false, 1); // tf_select = 0
-    }
-}
-
-/// Compute per-band bit caps from the CACHE_CAPS_50 table.
-///
-/// Mirrors `init_caps()` in libopus `celt/rate.c` (BSD-3-Clause).
-/// For mono (channels=1) at LM=`lm`:
-///   `cap[i] = ((CACHE_CAPS_50[(2*lm + 0) * 21 + i] + 64) * 1 * n) >> 2`
-/// where `n = (EBAND_5MS[i+1] - EBAND_5MS[i]) << lm`.
-pub(crate) fn celt_init_caps(lm: usize) -> Vec<i32> {
-    let channels = 1usize;
-    (0..NUM_BANDS_CELT)
-        .map(|i| {
-            let n = (EBAND_5MS[i + 1] - EBAND_5MS[i]) as usize * (1 << lm);
-            let idx = NUM_BANDS_CELT * (2 * lm + channels - 1) + i;
-            if idx >= CACHE_CAPS_50.len() {
-                return 0;
-            }
-            ((CACHE_CAPS_50[idx] as i32 + 64) * channels as i32 * n as i32) >> 2
-        })
-        .collect()
-}
-
-/// Convert pseudo-pulse index to actual pulse count.
-///
-/// Mirrors `get_pulses()` in libopus `celt/rate.c` (BSD-3-Clause).
-pub(crate) fn celt_get_pulses(i: i32) -> i32 {
-    if i < 8 {
-        i
-    } else {
-        (8 + (i & 7)) << ((i >> 3) - 1)
-    }
-}
-
-/// Convert bit count (Q3) to pseudo-pulse index via binary search.
-///
-/// Mirrors `bits2pulses()` in libopus `celt/rate.c` (BSD-3-Clause).
-fn celt_bits2pulses(band: usize, lm: usize, bits: i32) -> i32 {
-    const LOG_MAX_PSEUDO: usize = 6;
-    let lm1 = (lm + 1).min(4); // CACHE_INDEX_50 has 5 rows: lm1 = 0..4
-    let cache_base_idx = lm1 * NUM_BANDS_CELT + band;
-    if cache_base_idx >= CACHE_INDEX_50.len() {
-        return 0;
-    }
-    let cache_base = CACHE_INDEX_50[cache_base_idx];
-    if cache_base < 0 {
-        // Negative index → no cache entry; treat as 0 pulses.
-        return 0;
-    }
-    let cache_off = cache_base as usize;
-    if cache_off >= CACHE_BITS_50.len() {
-        return 0;
-    }
-    let cache = &CACHE_BITS_50[cache_off..];
-    let max_pseudo = cache[0] as i32;
-    let mut lo = 0i32;
-    let mut hi = max_pseudo;
-    let target = bits - 1;
-    for _ in 0..LOG_MAX_PSEUDO {
-        let mid = (lo + hi + 1) >> 1;
-        let mid_u = mid as usize;
-        if mid_u < cache.len() && (cache[mid_u] as i32) >= target {
-            hi = mid;
-        } else {
-            lo = mid;
-        }
-    }
-    let lo_bits = if lo == 0 {
-        -1
-    } else if (lo as usize) < cache.len() {
-        cache[lo as usize] as i32
-    } else {
-        -1
-    };
-    let hi_bits = if (hi as usize) < cache.len() {
-        cache[hi as usize] as i32
-    } else {
-        0
-    };
-    if target - lo_bits <= hi_bits - target {
-        lo
-    } else {
-        hi
-    }
-}
-
-/// Convert pseudo-pulse index to spent bits (Q3).
-///
-/// Mirrors `pulses2bits()` in libopus `celt/rate.c` (BSD-3-Clause).
-fn celt_pulses2bits(band: usize, lm: usize, pulses: i32) -> i32 {
-    if pulses == 0 {
-        return 0;
-    }
-    let lm1 = (lm + 1).min(4);
-    let cache_base_idx = lm1 * NUM_BANDS_CELT + band;
-    if cache_base_idx >= CACHE_INDEX_50.len() {
-        return 0;
-    }
-    let cache_base = CACHE_INDEX_50[cache_base_idx];
-    if cache_base < 0 {
-        return 0;
-    }
-    let cache_off = cache_base as usize;
-    if cache_off >= CACHE_BITS_50.len() {
-        return 0;
-    }
-    let cache = &CACHE_BITS_50[cache_off..];
-    let idx = pulses as usize;
-    if idx >= cache.len() {
-        return 0;
-    }
-    cache[idx] as i32 + 1
-}
-
-/// Allocation result from `celt_compute_allocation_enc`.
-struct CeltAllocResult {
-    coded_bands: usize,
-    /// Per-band Q3 bit budgets for PVQ (fine_quant already subtracted).
-    pulses: Vec<i32>,
-    fine_quant: Vec<i32>,
-    fine_priority: Vec<i32>,
-    /// Residual balance carried from the fine/coarse split (mirrors libopus `balance`).
-    balance: i32,
-}
-
-/// Compute CELT bit allocation for bands `start`..`NUM_BANDS_CELT` (encoder side).
-///
-/// Writes skip bits into `enc` and returns pulse/fine allocation arrays.
-/// When `start = 0` this covers all 21 bands (CELT-only path).
-/// When `start = 17` this covers only bands 17–20 (hybrid path).
-///
-/// Mirrors `clt_compute_allocation` + `interp_bits2pulses` from libopus
-/// `celt/rate.c` (BSD-3-Clause), adapted for encoding (writes skip bits
-/// instead of reading them).
-fn celt_compute_allocation_enc(
-    enc: &mut RangeEncoder,
-    total: i32,
-    offsets: &[i32],
-    cap: &[i32],
-    alloc_trim: i32,
-    lm: usize,
-    start: usize,
-) -> CeltAllocResult {
-    let end = NUM_BANDS_CELT;
-    let channels = 1usize;
-    let c = channels as i32;
-
-    let mut total_bits = total.max(0);
-    let skip_rsv = if total_bits >= (1 << BITRES) {
-        1 << BITRES
-    } else {
-        0
-    };
-    total_bits -= skip_rsv;
-
-    // Mono: no intensity or dual-stereo bits.
-    let intensity_rsv = 0i32;
-    let dual_stereo_rsv = 0i32;
-
-    // Threshold and trim-offset per band.
-    let mut thresh = vec![0i32; end];
-    let mut trim_offset = vec![0i32; end];
-    for j in start..end {
-        let band_n = (EBAND_5MS[j + 1] - EBAND_5MS[j]) as i32;
-        thresh[j] = (c << BITRES).max(((3 * band_n) << (lm as i32) << BITRES) >> 4);
-        trim_offset[j] = (c
-            * band_n
-            * (alloc_trim - 5 - lm as i32)
-            * (end - j - 1) as i32
-            * (1 << (lm as i32 + BITRES)))
-            >> 6;
-        if (band_n << (lm as i32)) == 1 {
-            trim_offset[j] -= c << BITRES;
-        }
-    }
-
-    // Bisection: find lo/hi allocation vector rows.
-    let mut lo = 1i32;
-    let mut hi = NB_ALLOC_VECTORS as i32 - 1;
-    while lo <= hi {
-        let mid = (lo + hi) >> 1;
-        let mut psum = 0i32;
-        let mut done = false;
-        for j in (start..end).rev() {
-            let n = (EBAND_5MS[j + 1] - EBAND_5MS[j]) as i32;
-            let alloc_row = mid as usize * end + j;
-            let mut bits_j = if alloc_row < BAND_ALLOCATION.len() {
-                (c * n * ((BAND_ALLOCATION[alloc_row] as i32) << (lm as i32))) >> 2
-            } else {
-                0
-            };
-            if bits_j > 0 {
-                bits_j = (bits_j + trim_offset[j]).max(0);
-            }
-            bits_j += offsets[j];
-            if bits_j >= thresh[j] || done {
-                done = true;
-                psum += bits_j.min(cap[j]);
-            } else if bits_j >= c << BITRES {
-                psum += c << BITRES;
-            }
-        }
-        if psum > total_bits {
-            hi = mid - 1;
-        } else {
-            lo = mid + 1;
-        }
-    }
-    hi = lo;
-    lo -= 1;
-
-    // Compute bits1 (lo allocation) and bits2 (range above lo).
-    let mut bits1 = vec![0i32; end];
-    let mut bits2 = vec![0i32; end];
-    let mut skip_start = start;
-    for j in start..end {
-        let n = (EBAND_5MS[j + 1] - EBAND_5MS[j]) as i32;
-        let alloc_lo = lo as usize * end + j;
-        let alloc_hi = hi as usize * end + j;
-        let mut bits1j = if lo > 0 && alloc_lo < BAND_ALLOCATION.len() {
-            (c * n * ((BAND_ALLOCATION[alloc_lo] as i32) << (lm as i32))) >> 2
-        } else {
-            0
-        };
-        let mut bits2j = if (hi as usize) < NB_ALLOC_VECTORS && alloc_hi < BAND_ALLOCATION.len() {
-            (c * n * ((BAND_ALLOCATION[alloc_hi] as i32) << (lm as i32))) >> 2
-        } else {
-            cap[j]
-        };
-        if bits1j > 0 {
-            bits1j = (bits1j + trim_offset[j]).max(0);
-        }
-        if bits2j > 0 {
-            bits2j = (bits2j + trim_offset[j]).max(0);
-        }
-        if lo > 0 {
-            bits1j += offsets[j];
-        }
-        bits2j += offsets[j];
-        if offsets[j] > 0 {
-            skip_start = j;
-        }
-        bits2j = (bits2j - bits1j).max(0);
-        bits1[j] = bits1j;
-        bits2[j] = bits2j;
-    }
-
-    // Interpolate between lo/hi to find final per-band bits, writing skip bits.
-    let mut pulses = vec![0i32; end];
-    let mut fine_quant = vec![0i32; end];
-    let mut fine_priority = vec![0i32; end];
-    let mut ibp_ctx = InterpBitsCtx {
-        bits1: &bits1,
-        bits2: &bits2,
-        thresh: &thresh,
-        cap,
-        bits_out: &mut pulses,
-        ebits_out: &mut fine_quant,
-        fine_priority_out: &mut fine_priority,
-        total: total_bits,
-        skip_rsv,
-        intensity_rsv,
-        dual_stereo_rsv,
-        channels,
-        lm,
-    };
-    let (coded_bands, balance) = interp_bits2pulses_enc(enc, start, end, skip_start, &mut ibp_ctx);
-
-    CeltAllocResult {
-        coded_bands,
-        pulses,
-        fine_quant,
-        fine_priority,
-        balance,
-    }
-}
-
-/// Context for `interp_bits2pulses_enc` carrying all band-indexed slices and
-/// scalar parameters that are not the encoder or range-start indices.
-struct InterpBitsCtx<'a> {
-    bits1: &'a [i32],
-    bits2: &'a [i32],
-    thresh: &'a [i32],
-    cap: &'a [i32],
-    bits_out: &'a mut [i32],
-    ebits_out: &'a mut [i32],
-    fine_priority_out: &'a mut [i32],
-    total: i32,
-    skip_rsv: i32,
-    intensity_rsv: i32,
-    dual_stereo_rsv: i32,
-    channels: usize,
-    lm: usize,
-}
-
-/// Interpolate allocation and write skip bits (encoder counterpart of decoder's
-/// `interp_bits2pulses`).  Writes one `enc_bit_logp(true, 1)` at the first
-/// band that would be "skip-checked", keeping all coded bands active.
-///
-/// Ported/adapted from libopus `celt/rate.c` (BSD-3-Clause).
-fn interp_bits2pulses_enc(
-    enc: &mut RangeEncoder,
-    start: usize,
-    end: usize,
-    skip_start: usize,
-    ctx: &mut InterpBitsCtx<'_>,
-) -> (usize, i32) {
-    let bits1 = ctx.bits1;
-    let bits2 = ctx.bits2;
-    let thresh = ctx.thresh;
-    let cap = ctx.cap;
-    let bits = &mut *ctx.bits_out;
-    let ebits = &mut *ctx.ebits_out;
-    let fine_priority = &mut *ctx.fine_priority_out;
-    let total = ctx.total;
-    let skip_rsv = ctx.skip_rsv;
-    let intensity_rsv = ctx.intensity_rsv;
-    let dual_stereo_rsv = ctx.dual_stereo_rsv;
-    let channels = ctx.channels;
-    let lm = ctx.lm;
-    let c = channels as i32;
-    let alloc_floor = c << BITRES;
-    let log_m = (lm as i32) << BITRES;
-
-    // Inner bisection: find interpolation fraction.
-    let mut lo = 0i32;
-    let mut hi = 1 << ALLOC_STEPS;
-    for _ in 0..ALLOC_STEPS {
-        let mid = (lo + hi) >> 1;
-        let mut psum = 0i32;
-        let mut done = false;
-        for j in (start..end).rev() {
-            let tmp = bits1[j] + ((mid * bits2[j]) >> ALLOC_STEPS);
-            if tmp >= thresh[j] || done {
-                done = true;
-                psum += tmp.min(cap[j]);
-            } else if tmp >= alloc_floor {
-                psum += alloc_floor;
-            }
-        }
-        if psum > total {
-            hi = mid;
-        } else {
-            lo = mid;
-        }
-    }
-
-    let mut psum = 0i32;
-    let mut done = false;
-    for j in (start..end).rev() {
-        let mut tmp = bits1[j] + ((lo * bits2[j]) >> ALLOC_STEPS);
-        if tmp < thresh[j] && !done {
-            tmp = if tmp >= alloc_floor { alloc_floor } else { 0 };
-        } else {
-            done = true;
-        }
-        tmp = tmp.min(cap[j]);
-        bits[j] = tmp;
-        psum += tmp;
-    }
-
-    // Skip loop: encode skip bits, reducing coded_bands if needed.
-    let mut coded_bands = end;
-    let mut total_adj = total;
-    let mut intensity_rsv_cur = intensity_rsv;
-    loop {
-        let j = coded_bands - 1;
-        if j <= skip_start {
-            total_adj += skip_rsv;
-            break;
-        }
-        let left = total - psum;
-        let denom = (EBAND_5MS[coded_bands] - EBAND_5MS[start]) as i32;
-        let percoeff = if denom > 0 { left / denom } else { 0 };
-        let left_rem = left - denom * percoeff;
-        let rem = (left_rem - (EBAND_5MS[j] - EBAND_5MS[start]) as i32).max(0);
-        let band_width = (EBAND_5MS[coded_bands] - EBAND_5MS[j]) as i32;
-        let mut band_bits = bits[j] + percoeff * band_width + rem;
-        if band_bits >= thresh[j].max(alloc_floor + (1 << BITRES)) {
-            // Write skip bit: 'true' = keep all bands (don't skip).
-            enc.enc_bit_logp(true, 1);
-            // Account for the skip bit cost.
-            psum += 1 << BITRES;
-            band_bits -= 1 << BITRES;
-            // Decoder would "break" here → coded_bands unchanged, loop exits.
-            total_adj = total;
-            let _ = band_bits;
-            break;
-        }
-        psum -= bits[j] + intensity_rsv_cur;
-        if intensity_rsv_cur > 0 {
-            intensity_rsv_cur = LOG2_FRAC_TABLE[(j - start).min(23)] as i32;
-        }
-        psum += intensity_rsv_cur;
-        bits[j] = if band_bits >= alloc_floor {
-            alloc_floor
-        } else {
-            0
-        };
-        psum += bits[j];
-        coded_bands -= 1;
-    }
-    coded_bands = coded_bands.max(start + 1);
-
-    // Mono: no intensity or dual-stereo bits to write.
-    let _ = (dual_stereo_rsv, intensity_rsv);
-
-    // Final distribution of remaining bits.
-    let left = total_adj - psum;
-    let denom = (EBAND_5MS[coded_bands] - EBAND_5MS[start]) as i32;
-    let percoeff = if denom > 0 { left / denom } else { 0 };
-    let mut left_rem = left - denom * percoeff;
-    for (j, bits_j) in bits.iter_mut().enumerate().take(coded_bands).skip(start) {
-        *bits_j += percoeff * (EBAND_5MS[j + 1] - EBAND_5MS[j]) as i32;
-        let tmp = left_rem.min((EBAND_5MS[j + 1] - EBAND_5MS[j]) as i32);
-        *bits_j += tmp;
-        left_rem -= tmp;
-    }
-
-    // Fine/coarse split + fine priority.
-    let stereo_shift = 0i32; // mono
-    let mut balance = 0i32;
-    for j in start..coded_bands {
-        let n0 = (EBAND_5MS[j + 1] - EBAND_5MS[j]) as i32;
-        let n = n0 << (lm as i32);
-        let bit = bits[j] + balance;
-        let excess;
-        if n > 1 {
-            excess = (bit - cap[j]).max(0);
-            bits[j] = bit - excess;
-            let den = c * n;
-            let nclogn = den * (LOG_N_400[j] as i32 + log_m);
-            let mut offset = (nclogn >> 1) - den * FINE_OFFSET;
-            if n == 2 {
-                offset += den << BITRES >> 2;
-            }
-            if bits[j] + offset < (den * 2) << BITRES {
-                offset += nclogn >> 2;
-            } else if bits[j] + offset < (den * 3) << BITRES {
-                offset += nclogn >> 3;
-            }
-            let e = ((bits[j] + offset + (den << (BITRES - 1))).max(0) / den) >> BITRES;
-            let e = e
-                .min(MAX_FINE_BITS)
-                .min((bits[j] >> stereo_shift) >> BITRES);
-            ebits[j] = e;
-            fine_priority[j] = i32::from(ebits[j] * (den << BITRES) >= bits[j] + offset);
-            bits[j] -= (c * ebits[j]) << BITRES;
-        } else {
-            excess = (bit - (c << BITRES)).max(0);
-            bits[j] = bit - excess;
-            ebits[j] = 0;
-            fine_priority[j] = 1;
-        }
-        if excess > 0 {
-            let extra_fine = ((excess >> BITRES).max(0)).min(MAX_FINE_BITS - ebits[j]);
-            ebits[j] += extra_fine;
-            let extra_bits = (extra_fine * c) << BITRES;
-            fine_priority[j] = i32::from(extra_bits >= excess - balance);
-            balance = excess - extra_bits;
-        } else {
-            balance = excess; // 0
-        }
-    }
-    for j in coded_bands..end {
-        ebits[j] = bits[j] >> stereo_shift >> BITRES;
-        bits[j] = 0;
-        fine_priority[j] = i32::from(ebits[j] < 1);
-    }
-    (coded_bands, balance)
-}
-
-/// Greedy PVQ pulse allocation + CWRS encode for a single CELT band.
-///
-/// Finds the best signed integer pulse vector `y` with L1 norm = `k_pulses`
-/// that maximises `<y, shape>`, then encodes it via `encode_pulses`.
-fn celt_alg_quant(shape: &[f32], k_pulses: u32, enc: &mut RangeEncoder) {
-    let n = shape.len();
-    if n == 0 || k_pulses == 0 {
-        return;
-    }
-    let mut y = vec![0i32; n];
-    let mut mag: Vec<f32> = shape.iter().map(|&x| x.abs()).collect();
-    let step = if k_pulses > 0 {
-        1.0 / k_pulses as f32
-    } else {
-        1.0
-    };
-    for _ in 0..k_pulses {
-        // Greedy: pick dimension with largest remaining residual.
-        let best = mag
-            .iter()
-            .enumerate()
-            .fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &v)| {
-                if v > bv {
-                    (i, v)
-                } else {
-                    (bi, bv)
-                }
-            })
-            .0;
-        y[best] += 1;
-        mag[best] = (mag[best] - step).max(0.0);
-    }
-    // Apply original signs.
-    for (i, yi) in y.iter_mut().enumerate() {
-        if i < shape.len() && shape[i] < 0.0 {
-            *yi = -*yi;
-        }
-    }
-    opus_pvq::encode_pulses(enc, &y);
-}
-
-/// LOG_N_400 re-export for use inside the allocation and split functions.
-use crate::opus_celt_tables::LOG_N_400;
-
-// ── Band-splitting helpers (ported from libopus `celt/bands.c`, BSD-3-Clause) ─
-
-/// Return true iff the decoder will split band `band` at level `lm`.
-///
-/// Mirrors the `do_split` condition at the top of `quant_partition_mono` in
-/// libopus `celt/bands.c` (BSD-3-Clause).
-fn check_do_split_enc(band: usize, lm: i32, n0: usize, b: i32) -> bool {
-    if lm < 0 || n0 <= 2 {
-        return false;
-    }
-    let lm1 = ((lm + 1) as usize).min(4);
-    let cache_row = lm1 * NUM_BANDS_CELT + band;
-    if cache_row >= CACHE_INDEX_50.len() {
-        return false;
-    }
-    let cache_base = CACHE_INDEX_50[cache_row];
-    if cache_base < 0 {
-        return false;
-    }
-    let cache = &CACHE_BITS_50[cache_base as usize..];
-    if cache.is_empty() {
-        return false;
-    }
-    let max_pseudo = cache[0] as usize;
-    if max_pseudo >= cache.len() {
-        return false;
-    }
-    b > cache[max_pseudo] as i32 + 12
-}
-
-/// Compute theta quantisation parameter `qn`.
-///
-/// Mirrors `compute_qn()` in libopus `celt/bands.c` (BSD-3-Clause).
-fn celt_compute_qn(n: usize, b: i32, offset: i32, pulse_cap: i32) -> i32 {
-    let n2 = 2 * n as i32 - 1;
-    let mut qb = (b + n2 * offset) / n2;
-    qb = qb.min(b - pulse_cap - (4 << BITRES));
-    qb = qb.min(8 << BITRES);
-    if qb < (1 << BITRES >> 1) {
-        1
-    } else {
-        let mut qn = EXP2_TABLE8[(qb & 0x7) as usize] >> (14 - (qb >> BITRES));
-        qn = ((qn + 1) >> 1) << 1;
-        qn.min(256)
-    }
-}
-
-/// Extract a unit-norm band shape from the 960-coefficient CELT MDCT spectrum.
-///
-/// Reads `n` consecutive coefficients starting at `celt_lo` (CELT coefficient
-/// index) and normalises them to unit L2 norm.  No upsampling is needed
-/// because the CELT spectrum already has one coefficient per PVQ dimension.
-fn celt_band_shape_from_spec(celt_spec: &[f32], celt_lo: usize, n: usize) -> Vec<f32> {
-    let n_coeff = celt_spec.len();
-    let mut shape: Vec<f32> = (0..n)
-        .map(|p| {
-            let idx = celt_lo + p;
-            if idx < n_coeff {
-                celt_spec[idx]
-            } else {
-                0.0
-            }
-        })
-        .collect();
-    let norm: f32 = shape.iter().map(|&x| x * x).sum::<f32>().sqrt();
-    if norm > 1e-20 {
-        for v in shape.iter_mut() {
-            *v /= norm;
-        }
-    } else if !shape.is_empty() {
-        shape[0] = 1.0;
-    }
-    shape
-}
-
-/// Context for `encode_band_with_splits` carrying the parameters that do not
-/// change across recursive calls.
-struct BandEncCtx<'a> {
-    celt_spec: &'a [f32],
-    band: usize,
-    celt_lo: usize,
-}
-
-/// Encode one CELT band, recursively splitting it when the decoder would also
-/// split (i.e., when b > cache_max + 12).
-///
-/// Strategy: encode theta = 0 (itheta = 0, all bits to the lower-frequency
-/// half) for every split.  The decoder decodes this correctly: upper half gets
-/// 0 bits and uses noise fill; lower half is recursively encoded.
-///
-/// Mirrors the split path in libopus `celt/bands.c`
-/// `quant_partition_mono` (BSD-3-Clause).
-fn encode_band_with_splits(
-    ctx: &BandEncCtx<'_>,
-    lm: i32,
-    b: i32,
-    remaining_bits: &mut i32,
-    enc: &mut RangeEncoder,
-    n0: usize,
-) {
-    let celt_spec = ctx.celt_spec;
-    let band = ctx.band;
-    let celt_lo = ctx.celt_lo;
-
-    // N = 1: only a sign bit (no PVQ shape).
-    if n0 == 1 {
-        if *remaining_bits >= (1 << BITRES) {
-            enc.enc_bits(0, 1); // encode positive sign
-            *remaining_bits -= 1 << BITRES;
-        }
-        return;
-    }
-
-    let do_split = check_do_split_enc(band, lm, n0, b);
-
-    if do_split {
-        let n = n0 >> 1; // half-band CELT coefficient count
-        let lm_new = lm - 1;
-
-        // pulse_cap and offset for compute_qn — same formula as decode_theta_mono.
-        let log_n_val = LOG_N_400.get(band).copied().unwrap_or(0) as i32;
-        let pulse_cap = log_n_val + lm_new * (1 << BITRES);
-        let offset = (pulse_cap >> 1) - QTHETA_OFFSET;
-        let qn = celt_compute_qn(n, b, offset, pulse_cap);
-
-        let mut b_after = b;
-        if qn != 1 {
-            // Encode itheta = 0 using the triangular distribution (blocks0=1).
-            // Decoder: ft = ((qn>>1)+1)^2; reads fm then dec.update(fl, fl+fs, ft).
-            // For itheta_step=0: fl=0, fs=1. Encoder writes encode(0, 1, ft).
-            let ft = ((qn >> 1) + 1) * ((qn >> 1) + 1);
-            let tell_before = enc.tell_frac() as i32;
-            enc.encode(0, 1, ft as u32);
-            let qalloc = enc.tell_frac() as i32 - tell_before;
-            b_after -= qalloc;
-            *remaining_bits -= qalloc;
-        }
-
-        // itheta = 0 → delta = −16384.
-        // mbits = max(0, min(b_after, (b_after+16384)/2)) = b_after.
-        // sbits = 0 → decoder uses noise fill for the upper-frequency half.
-        let mbits = b_after;
-
-        // Recurse on the lower-frequency half; upper half writes nothing.
-        encode_band_with_splits(
-            ctx,
-            lm_new,
-            mbits,
-            remaining_bits,
-            enc,
-            n, // half the coefficient count
-        );
-    } else {
-        // No split: standard bits2pulses → K → alg_quant path.
-        let lm_u = lm.max(0) as usize;
-        let q = celt_bits2pulses(band, lm_u, b.max(0));
-        let curr_bits = celt_pulses2bits(band, lm_u, q);
-        // Mirror decoder's q-reduction loop: cap q so remaining_bits stays ≥ 0.
-        let mut q_enc = q;
-        let mut cost_enc = curr_bits;
-        let mut rem = *remaining_bits - curr_bits;
-        while rem < 0 && q_enc > 0 {
-            rem += cost_enc;
-            q_enc -= 1;
-            cost_enc = celt_pulses2bits(band, lm_u, q_enc);
-            rem -= cost_enc;
-        }
-        let k = celt_get_pulses(q_enc);
-        if k > 0 {
-            let shape = celt_band_shape_from_spec(celt_spec, celt_lo, n0);
-            celt_alg_quant(&shape, k as u32, enc);
-        }
     }
 }
 
@@ -1348,7 +996,7 @@ fn encode_celt_frame_inner(
         let k = compute_k_pulses(band_coeffs.len(), bits_per_band);
         if k > 0 {
             let y = pvq_encode(&normalized, k);
-            opus_pvq::encode_pulses(enc, &y);
+            let _overflowed = opus_pvq::encode_pulses(enc, &y);
         }
     }
 }

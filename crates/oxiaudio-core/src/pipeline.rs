@@ -52,10 +52,17 @@ impl AudioPipeline {
         Ok(buf)
     }
 
-    /// Sum of node latency declarations in frames (0 for now; individual nodes
-    /// may expose this in a future API).
+    /// Sum of node latency declarations in frames.
+    ///
+    /// Convenience wrapper around [`AudioPipeline::total_latency_frames`] for
+    /// callers that just want a plain `usize` (an empty pipeline, or one whose
+    /// nodes all report unknown/zero latency, reads as `0`). Use
+    /// [`AudioPipeline::total_latency_frames`] directly when the
+    /// empty-pipeline-vs-zero-latency distinction (`None` vs `Some(0)`)
+    /// matters to the caller.
+    #[must_use]
     pub fn latency_hint(&self) -> usize {
-        0
+        self.total_latency_frames().unwrap_or(0)
     }
 
     /// Total declared latency in frames across all nodes in this pipeline.
@@ -304,6 +311,48 @@ mod tests {
             .push_node(Box::new(PassThrough));
         // Both contribute 0 (None → 0, default → 0)
         assert_eq!(pipeline.total_latency_frames(), Some(0));
+    }
+
+    /// Regression test: `latency_hint()` used to be a hardcoded stub that
+    /// always returned 0 regardless of what nodes declared. It must now agree
+    /// with `total_latency_frames()` (collapsing `None` — the empty-pipeline
+    /// case — to 0) for a pipeline containing a real latency-declaring node.
+    #[test]
+    fn test_latency_hint_agrees_with_total_latency_frames() {
+        struct DelayNode {
+            frames: usize,
+        }
+        impl AudioNode for DelayNode {
+            fn name(&self) -> &str {
+                "delay"
+            }
+            fn latency_frames(&self) -> Option<usize> {
+                Some(self.frames)
+            }
+            fn process(&self, input: &AudioBuffer<f32>) -> Result<AudioBuffer<f32>, OxiAudioError> {
+                Ok(input.clone())
+            }
+        }
+
+        let pipeline = AudioPipeline::new()
+            .push_node(Box::new(DelayNode { frames: 100 }))
+            .push_node(Box::new(DelayNode { frames: 56 }));
+        assert_eq!(
+            pipeline.latency_hint(),
+            156,
+            "latency_hint must reflect real declared node latency, not a hardcoded 0"
+        );
+        assert_eq!(
+            Some(pipeline.latency_hint()),
+            pipeline.total_latency_frames(),
+            "latency_hint must agree with total_latency_frames for a non-empty pipeline"
+        );
+
+        // Empty-pipeline case: total_latency_frames() is None, latency_hint()
+        // collapses that to 0 (documented behavior difference).
+        let empty = AudioPipeline::new();
+        assert_eq!(empty.total_latency_frames(), None);
+        assert_eq!(empty.latency_hint(), 0);
     }
 
     #[test]

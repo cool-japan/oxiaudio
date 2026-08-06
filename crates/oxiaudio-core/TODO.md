@@ -1,7 +1,12 @@
 # oxiaudio-core TODO
 
 ## Status
-Foundation types and traits for the OxiAudio workspace. Implements `AudioBuffer<T>` (interleaved), `SampleFormat` (F32/I16/I32/F64), `ChannelLayout` (Mono/Stereo), codec traits (`AudioDecoder`, `AudioEncoder`, `StreamingDecoder`), pipeline traits (`AudioFilter`, `AudioSource`, `AudioSink`), metadata types (`AudioFormat`, `AudioMetadata`), conversion impls (f32<->i16, f32<->i32, f32<->f64, planar<->interleaved), and `OxiAudioError`. All milestones M0-M4 complete. Approximately 295 SLOC including tests.
+Foundation types and traits for the OxiAudio workspace. Implements `AudioBuffer<T>` (interleaved), `SampleFormat` (F32/I16/I32/F64), `ChannelLayout` (Mono/Stereo), codec traits (`AudioDecoder`, `AudioEncoder`, `StreamingDecoder`), pipeline traits (`AudioFilter`, `AudioSource`, `AudioSink`), metadata types (`AudioFormat`, `AudioMetadata`), conversion impls (f32<->i16, f32<->i32, f32<->f64, planar<->interleaved), and `OxiAudioError`. All milestones M0–M23 complete (see the workspace `TODO.md` for the full
+per-milestone feature list: surround `ChannelLayout` variants, `ChannelMap`/`ChannelId`,
+`AudioRingBuffer`, `AudioClock`, `AudioPipeline`, binary IPC serialization, optional `serde`).
+3,422 SLOC of production code across 12 source files in `src/` (`tokei crates/oxiaudio-core/src`,
+Code column, measured 2026-08-06); 136 tests passing with default features, 140 with
+`--all-features`.
 
 ## Core Implementation
 

@@ -2,8 +2,11 @@
 //!
 //! Reads logical bitstream pages and reassembles them into complete packets.
 //! Supports continuation pages, beginning-of-stream (BOS), and end-of-stream (EOS)
-//! markers. Does not validate CRC by default; uses the CRC32 polynomial 0x04C11DB7
-//! defined in RFC 3533 §6.
+//! markers. Every page's CRC-32 checksum (polynomial 0x04C11DB7, RFC 3533 §6.3) is
+//! validated against a freshly computed value before the page is accepted; a page
+//! whose stored checksum does not match is rejected with [`OxiAudioError::Decode`]
+//! rather than being handed to the downstream codec. This closes off attacker- or
+//! corruption-induced bit flips reaching the Opus/Vorbis decoders unverified.
 
 use std::io::Read;
 
@@ -70,8 +73,11 @@ impl<R: Read> OggReader<R> {
     ///
     /// # Errors
     ///
-    /// Returns [`OxiAudioError::Decode`] on malformed OGG data, or
-    /// [`OxiAudioError::Io`] on underlying I/O failures.
+    /// Returns [`OxiAudioError::Decode`] on malformed OGG data — including a page
+    /// whose stored CRC-32 checksum does not match the checksum recomputed over
+    /// the received bytes (RFC 3533 §6.3); such a page is rejected outright and
+    /// never reaches the caller, even partially — or [`OxiAudioError::Io`] on
+    /// underlying I/O failures.
     pub fn read_packet(&mut self) -> Result<Option<Vec<u8>>, OxiAudioError> {
         loop {
             // Process any pending segments from the last loaded page.
@@ -141,7 +147,7 @@ impl<R: Read> OggReader<R> {
         //   granule_position i64 LE   8 bytes
         //   bitstream_serial u32 LE   4 bytes
         //   page_sequence    u32 LE   4 bytes
-        //   checksum         u32 LE   4 bytes  (we parse but do not validate)
+        //   checksum         u32 LE   4 bytes  (validated against a recomputed CRC-32)
         //   page_segments    u8       1 byte
         //   segment_table    u8[n]    n bytes
         //   page_data        (sum of segment_table) bytes
@@ -200,13 +206,12 @@ impl<R: Read> OggReader<R> {
             .map_err(OxiAudioError::Io)?;
         let seq_num = u32::from_le_bytes(seq_buf);
 
-        // checksum (4 bytes LE u32) — parse but ignore for now.
+        // checksum (4 bytes LE u32) — validated below once the whole page is read.
         let mut crc_buf = [0u8; 4];
         self.reader
             .read_exact(&mut crc_buf)
             .map_err(OxiAudioError::Io)?;
-        // (CRC validation is intentionally skipped — malformed pages are rare in practice
-        //  and error recovery is better handled by the downstream packet decoder.)
+        let stored_crc = u32::from_le_bytes(crc_buf);
 
         // page_segments (1 byte)
         let mut n_seg_buf = [0u8; 1];
@@ -228,6 +233,33 @@ impl<R: Read> OggReader<R> {
             .read_exact(&mut data)
             .map_err(OxiAudioError::Io)?;
 
+        // --- Validate the RFC 3533 §6.3 CRC-32 ---
+        //
+        // The checksum is computed over the entire page (header + segment table +
+        // page data) with the checksum field itself zeroed. Reconstruct that exact
+        // byte layout from the fields already parsed above and compare against the
+        // value stored on the wire; reject the page on any mismatch instead of
+        // handing unverified bytes to the downstream Opus/Vorbis decoder.
+        let mut page_for_crc = Vec::with_capacity(27 + n_segments + total_data);
+        page_for_crc.extend_from_slice(&magic);
+        page_for_crc.push(version_buf[0]);
+        page_for_crc.push(header_type);
+        page_for_crc.extend_from_slice(&granule_buf);
+        page_for_crc.extend_from_slice(&serial_buf);
+        page_for_crc.extend_from_slice(&seq_buf);
+        page_for_crc.extend_from_slice(&[0u8; 4]); // checksum field zeroed for computation
+        page_for_crc.push(n_seg_buf[0]);
+        page_for_crc.extend_from_slice(&segment_table);
+        page_for_crc.extend_from_slice(&data);
+
+        let computed_crc = ogg_crc32(&page_for_crc);
+        if computed_crc != stored_crc {
+            return Err(OxiAudioError::Decode(format!(
+                "OGG page CRC-32 mismatch at sequence {seq_num} (serial {serial}): \
+                 stored={stored_crc:#010X}, computed={computed_crc:#010X}"
+            )));
+        }
+
         Ok(Some(OggPage {
             header_type,
             granule_pos,
@@ -241,9 +273,10 @@ impl<R: Read> OggReader<R> {
 
 /// OGG CRC-32 with the polynomial 0x04C11DB7 used in RFC 3533.
 ///
-/// Not used in the current implementation (CRC validation is skipped),
-/// but provided for completeness and future validation support.
-#[allow(dead_code)]
+/// Used by `OggReader::read_page` to validate every page's checksum field
+/// (bit-by-bit, MSB-first, initial value 0, no final XOR — cross-checked against
+/// the table-driven implementation in `oxiaudio_encode::ogg::ogg_crc32`, which
+/// produces identical output for the same input).
 pub fn ogg_crc32(data: &[u8]) -> u32 {
     const POLY: u32 = 0x04C11DB7;
     let mut crc: u32 = 0;
@@ -265,10 +298,15 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    /// Build a minimal OGG page with a single segment.
+    /// Build a minimal OGG page with a single segment and a correct CRC-32.
     ///
     /// Header layout (per RFC 3533):
-    ///   "OggS" + version(0) + header_type + granule_pos(0) + serial(1) + seq(0) + crc(0) + n_segs(1) + seg_table + data
+    ///   "OggS" + version(0) + header_type + granule_pos(0) + serial(1) + seq(0) + crc + n_segs(1) + seg_table + data
+    ///
+    /// The checksum field is written as 0 while building the page, then patched
+    /// in-place with the real CRC-32 computed over the whole page (matching the
+    /// encoder-side convention in `oxiaudio_encode::ogg::write_ogg_page_raw`), so
+    /// pages built by this helper pass [`OggReader`]'s CRC validation.
     fn build_ogg_page(header_type: u8, payload: &[u8]) -> Vec<u8> {
         let mut page = Vec::new();
         page.extend_from_slice(b"OggS");
@@ -277,7 +315,7 @@ mod tests {
         page.extend_from_slice(&0i64.to_le_bytes()); // granule_pos
         page.extend_from_slice(&1u32.to_le_bytes()); // serial
         page.extend_from_slice(&0u32.to_le_bytes()); // seq_num
-        page.extend_from_slice(&0u32.to_le_bytes()); // crc (not validated)
+        page.extend_from_slice(&0u32.to_le_bytes()); // crc placeholder, patched below
                                                      // Segment table: one segment per chunk of ≤ 255 bytes.
         let chunks: Vec<&[u8]> = payload.chunks(255).collect();
         page.push(chunks.len() as u8); // n_segments
@@ -287,6 +325,8 @@ mod tests {
         for chunk in &chunks {
             page.extend_from_slice(chunk);
         }
+        let crc = ogg_crc32(&page);
+        page[22..26].copy_from_slice(&crc.to_le_bytes());
         page
     }
 
@@ -321,11 +361,13 @@ mod tests {
         page.extend_from_slice(&0i64.to_le_bytes()); // granule_pos
         page.extend_from_slice(&1u32.to_le_bytes()); // serial
         page.extend_from_slice(&0u32.to_le_bytes()); // seq_num
-        page.extend_from_slice(&0u32.to_le_bytes()); // crc
+        page.extend_from_slice(&0u32.to_le_bytes()); // crc placeholder, patched below
         page.push(2); // n_segments = 2
         page.push(2); // seg[0] = 2 bytes → packet 1
         page.push(2); // seg[1] = 2 bytes → packet 2
         page.extend_from_slice(b"ABCD");
+        let crc = ogg_crc32(&page);
+        page[22..26].copy_from_slice(&crc.to_le_bytes());
 
         let mut reader = OggReader::new(Cursor::new(page));
         let pkt1 = reader.read_packet().expect("no error").expect("packet 1");
@@ -341,5 +383,86 @@ mod tests {
     fn test_ogg_crc32_known_value() {
         // CRC32 of empty data should be 0.
         assert_eq!(ogg_crc32(&[]), 0);
+        // Known-answer vector independently cross-checked against a table-driven
+        // reference implementation of the same RFC 3533 §6.3 polynomial (also used
+        // by `oxiaudio_encode::ogg::ogg_crc32::test_ogg_crc32_deterministic`).
+        let data = b"OggS\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x01\x01";
+        assert_eq!(ogg_crc32(data), 0x49a1_d5fd);
+    }
+
+    // ─── CRC-32 validation regression tests ───────────────────────────────────
+
+    #[test]
+    fn test_valid_page_with_correct_crc_is_accepted() {
+        // A page built with the real, patched-in CRC-32 must be read successfully.
+        // (This is also exercised implicitly by every other test in this module
+        // now that `build_ogg_page` embeds a correct checksum, but this test names
+        // the acceptance path explicitly.)
+        let page = build_ogg_page(0x02 | 0x04, b"valid payload"); // BOS|EOS
+        let mut reader = OggReader::new(Cursor::new(page));
+        let pkt = reader
+            .read_packet()
+            .expect("a page with a correct CRC-32 must be accepted")
+            .expect("packet must be present");
+        assert_eq!(&pkt, b"valid payload");
+    }
+
+    #[test]
+    fn test_corrupted_payload_byte_rejected_by_crc_check() {
+        // Build a page with a correct CRC-32, then flip one bit in the payload
+        // (the last byte of the page) without updating the checksum. The reader
+        // must reject the page instead of handing corrupted bytes to the caller.
+        let mut page = build_ogg_page(0x02, b"ABC");
+        let last = page.len() - 1;
+        page[last] ^= 0xFF;
+
+        let mut reader = OggReader::new(Cursor::new(page));
+        let err = reader
+            .read_packet()
+            .expect_err("a payload bit-flip must invalidate the CRC-32 and be rejected");
+        assert!(
+            matches!(err, OxiAudioError::Decode(_)),
+            "expected Decode error for CRC mismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_corrupted_header_field_rejected_by_crc_check() {
+        // Corrupt the serial-number field (bytes 14..18) directly, leaving the
+        // stored CRC-32 pointing at the original (uncorrupted) header. The CRC
+        // covers the whole page, so header tampering must be caught too, not
+        // just payload tampering.
+        let mut page = build_ogg_page(0x02, b"XYZ");
+        page[14] ^= 0xFF;
+
+        let mut reader = OggReader::new(Cursor::new(page));
+        let err = reader
+            .read_packet()
+            .expect_err("a corrupted header field must invalidate the CRC-32 and be rejected");
+        assert!(
+            matches!(err, OxiAudioError::Decode(_)),
+            "expected Decode error for CRC mismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_crc_mismatch_error_message_contains_diagnostics() {
+        // The error message should carry enough context (sequence number, stored
+        // vs. computed CRC) to debug a real corrupted stream.
+        let mut page = build_ogg_page(0x02, b"diagnostic payload");
+        let last = page.len() - 1;
+        page[last] ^= 0xFF;
+
+        let mut reader = OggReader::new(Cursor::new(page));
+        let err = reader
+            .read_packet()
+            .expect_err("must reject corrupted page");
+        let OxiAudioError::Decode(msg) = err else {
+            panic!("expected Decode error, got {err:?}");
+        };
+        assert!(
+            msg.contains("CRC-32") && msg.contains("stored") && msg.contains("computed"),
+            "error message should mention CRC-32 stored/computed values for debuggability, got: {msg}"
+        );
     }
 }

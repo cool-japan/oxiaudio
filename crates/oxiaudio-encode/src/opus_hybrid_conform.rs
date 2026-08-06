@@ -20,12 +20,24 @@
 //!
 //! ```text
 //! packet = [TOC=0x78 | range-coded bytes]
-//!            ↑ 1 byte  ↑ shared ec stream
+//!            ↑ 1 byte  ↑ shared ec stream (exactly `target_bytes` long)
 //!
 //! shared ec stream:
 //!   [SILK WB silence (inactive, frame_length=320, 16 kHz)]
+//!   [redundancy flag, logp=12 — always "no redundancy"]
 //!   [CELT high-band frame (start_band=17, no silence flag)]
 //! ```
+//!
+//! # Scope limitation — the low band is silence
+//!
+//! The SILK layer here is `encode_silk_wb_silence_into`: a conformant but
+//! **inactive** wideband frame. The real analysis-by-synthesis SILK encoder
+//! (`crate::opus_silk_encode`) is narrowband-only, so hybrid mode currently
+//! carries no low-frequency audio at all — only the CELT high band (17–20,
+//! i.e. 8–20 kHz) is real. `select_conformant_mode` therefore never chooses
+//! [`crate::opus_encoder::OpusConformantMode::Hybrid`]; it is reachable only by
+//! explicit caller request. Wiring a wideband SILK encoder in (16 kHz internal
+//! rate, order-16 NLSF codebooks, 20 shell blocks) is tracked as remaining work.
 //!
 //! # Conformance
 //!
@@ -35,6 +47,26 @@
 //! the `else { false }` branch of the silence check, and post-filter is skipped
 //! because `start != 0`. The shared [`RangeEncoder`] is correctly positioned
 //! for the decoder to continue reading CELT symbols immediately after SILK.
+//!
+//! Two things had to be fixed in oxiaudio 0.2.1 before that claim was true, and
+//! both were invisible to a "does it decode?" test — the packets decoded to 960
+//! samples the whole time, they just decoded *different symbols*:
+//!
+//! * **The redundancy flag was missing.** Between the SILK and CELT layers a
+//!   hybrid decoder reads a one-bit flag (`logp = 12`, guarded by
+//!   `tell + 37 <= total_bits`) saying whether the packet carries a redundant
+//!   0–8 kHz CELT frame. Not writing it shifted every following CELT symbol by
+//!   one bit position, so the encoder's and decoder's `final_range` registers
+//!   never matched at any frame size.
+//! * **The CELT layer's bit budget was a constant.** It was written against a
+//!   hardcoded 512 bits while the packet was assembled with a variable-length
+//!   `finish()`, so the decoder's `total_bits = payload_len · 8` only matched by
+//!   coincidence. The packet is now emitted as exact CBR at `target_bytes` and
+//!   the layer is given `target_bytes · 8`.
+//!
+//! `tests/m_opus_celt_snr.rs::hybrid_packet_layer_budget_is_consistent` pins
+//! `final_range` equality against the reference decoder across the whole
+//! `[MIN_HYBRID_FRAME_BYTES, MAX_HYBRID_FRAME_BYTES]` range.
 
 use crate::opus_range::RangeEncoder;
 use crate::opus_silk_conform::encode_silk_wb_silence_into;
@@ -78,7 +110,55 @@ const TOC_HYBRID_FB_20MS_MONO: u8 = 0x78;
 /// matching the hybrid CELT decoder which skips the silence-flag branch when
 /// `tell > 1` (already consumed by SILK) and skips post-filter when `start != 0`.
 pub fn encode_hybrid_frame_conformant(pcm: &[f32], channels: usize) -> Vec<u8> {
+    encode_hybrid_frame_conformant_sized(pcm, channels, DEFAULT_HYBRID_FRAME_BYTES).0
+}
+
+/// Default hybrid payload size in bytes per 20 ms frame (≈25.6 kbps).
+///
+/// Matches the CELT-only default so the two paths are directly comparable.
+pub const DEFAULT_HYBRID_FRAME_BYTES: usize = 64;
+
+/// Smallest hybrid payload the writer will emit.
+///
+/// The SILK WB low band alone costs ~10 bytes of side information before any
+/// CELT symbol is written, so anything below this cannot hold a well-formed
+/// two-layer frame.
+pub const MIN_HYBRID_FRAME_BYTES: usize = 20;
+
+/// Largest hybrid payload the writer will emit (RFC 6716 §3.2.1 frame limit).
+pub const MAX_HYBRID_FRAME_BYTES: usize = 1275;
+
+/// [`encode_hybrid_frame_conformant`] at an explicit CBR payload size.
+///
+/// Returns `(packet, final_range)`. `target_bytes` is the payload length in
+/// bytes **excluding** the TOC byte and is clamped to
+/// `[MIN_HYBRID_FRAME_BYTES, MAX_HYBRID_FRAME_BYTES]`; the emitted payload is
+/// exactly that many bytes, which is what makes the CELT layer's bit budget
+/// (`target_bytes * 8`) equal to the `total_bits` the decoder derives from the
+/// packet length.
+///
+/// As on the CELT-only path, a frame whose range-coded (front) and raw-bit
+/// (back) halves collide is retried one byte smaller rather than shipped with
+/// dropped bytes — the decoder re-derives its budget from the emitted length,
+/// so a smaller frame is simply a lower-rate, still exactly conformant encode.
+pub fn encode_hybrid_frame_conformant_sized(
+    pcm: &[f32],
+    channels: usize,
+    target_bytes: usize,
+) -> (Vec<u8>, u32) {
     let _ = channels; // currently unused; CELT layer is always mono
+    let mut bytes = target_bytes.clamp(MIN_HYBRID_FRAME_BYTES, MAX_HYBRID_FRAME_BYTES);
+    loop {
+        let (packet, range, fits) = encode_hybrid_try(pcm, bytes);
+        if fits || bytes <= MIN_HYBRID_FRAME_BYTES {
+            return (packet, range);
+        }
+        bytes -= 1;
+    }
+}
+
+/// One hybrid encode attempt at an exact payload size.
+fn encode_hybrid_try(pcm: &[f32], target_bytes: usize) -> (Vec<u8>, u32, bool) {
     let mut enc = RangeEncoder::new();
 
     // ── SILK WB silence layer ─────────────────────────────────────────────────
@@ -87,20 +167,39 @@ pub fn encode_hybrid_frame_conformant(pcm: &[f32], channels: usize) -> Vec<u8> {
     // so it expects WB tables (order=16, 20 shell blocks, 320-sample frame).
     encode_silk_wb_silence_into(&mut enc);
 
+    // ── Redundancy flag (RFC 6716 §4.5, hybrid only) ─────────────────────────
+    // Between the SILK and CELT layers a hybrid decoder reads a one-bit
+    // "packet carries a redundant 0–8 kHz CELT frame" flag with `logp = 12`,
+    // guarded by `tell + 17 + 20 <= total_bits` (17 bits for the redundancy
+    // header it would introduce, 20 for the smallest useful redundant frame).
+    // Omitting it — which this encoder did before oxiaudio 0.2.1 — shifts every
+    // subsequent CELT symbol by one bit position, so the packet still decoded
+    // to 960 samples but the decoder's `final_range` never matched the
+    // encoder's. We always signal "no redundancy".
+    let total_bits = (target_bytes as i32).saturating_mul(8);
+    if enc.tell() + 17 + 20 <= total_bits {
+        enc.enc_bit_logp(false, 12);
+    }
+
     // ── CELT high-band layer (start_band=17, no silence flag) ────────────────
     // Continues encoding into the SAME range coder.  The hybrid CELT decoder
     // sets start_band=17 and reads bands 17–20 from wherever SILK left off.
     // encode_celt_hybrid_layer_into omits the silence flag (which the decoder
     // skips in hybrid mode because tell > 1 after SILK) and post-filter flag
     // (skipped because start_band != 0), then encodes bands 17–20 only.
-    crate::opus_celt::encode_celt_hybrid_layer_into(pcm, &mut enc);
+    let mut trace = crate::opus_celt::CeltEncodeTrace::default();
+    crate::opus_celt::encode_celt_hybrid_layer_into(pcm, target_bytes, &mut enc, &mut trace);
 
     // ── Assemble packet ───────────────────────────────────────────────────────
-    let payload = enc.finish();
+    // CBR: `finish_to_size_checked` pads to exactly `target_bytes`, so the
+    // decoder's `total_bits = payload_len * 8` equals the budget the CELT layer
+    // was written against.
+    let final_range = enc.final_range();
+    let (payload, fits) = enc.finish_to_size_checked(target_bytes);
     let mut packet = Vec::with_capacity(1 + payload.len());
     packet.push(TOC_HYBRID_FB_20MS_MONO);
     packet.extend_from_slice(&payload);
-    packet
+    (packet, final_range, fits)
 }
 
 // ── Unit tests ─────────────────────────────────────────────────────────────────

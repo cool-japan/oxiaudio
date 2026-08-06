@@ -1,21 +1,53 @@
 //! OGG Opus stream encoder.
 //!
-//! Wraps `OpusHead` / `OpusTags` generation, OGG muxing, and per-frame CELT
+//! Wraps `OpusHead` / `OpusTags` generation, OGG muxing, and per-frame Opus
 //! encoding behind a simple `encode_opus` function.
 //!
-//! # Structural limitations
+//! # Conformance
 //!
-//! This encoder produces structurally valid OGG Opus files — correct `OggS` magic,
-//! correct `OpusHead` / `OpusTags` pages, correct granule positions — but the audio
-//! payload uses non-conformant 4-bit quantization instead of PVQ (RFC 6716 §4.3.4).
-//! Standard Opus decoders will reject the audio frames. The encoder is suitable for:
-//! - Exercising the OGG container writer and range coder.
-//! - Writing integration tests that verify OGG framing without full RFC compliance.
-//! - As a structural scaffold for a future conformant CELT implementation.
+//! [`encode_opus`] and [`OpusStreamEncoder`] — the default, most-discoverable
+//! entry points — route every 20 ms frame through the RFC 6716–conformant
+//! per-frame encoders (automatic CELT/SILK mode selection via
+//! [`select_conformant_mode`] for [`encode_opus`]; CELT-only for the streaming
+//! [`OpusStreamEncoder`]). The emitted OGG Opus stream is structurally valid
+//! **and** its packets are accepted by a standard Opus decoder (verified
+//! per-frame against the `opus-decoder` reference crate).
+//!
+//! Bit-exactness is verified rather than assumed: the CELT path's `final_range`
+//! register matches the reference decoder's for every supported frame size on a
+//! corpus that includes full-scale noise (`tests/m_opus_celt_snr.rs`), which is
+//! the canonical libopus conformance check. Per-band energy is reproduced within
+//! a few dB and the overall decoded level within ±3 dB.
+//!
+//! This is still *not* a transparent-quality encoder — see
+//! [`OpusConformantMode`], `crate::opus_celt`'s module doc and
+//! `crate::opus_silk_encode`'s module doc for the exact, honestly-measured
+//! caveats: CELT is mono-only (stereo input is downmixed), non-transient, with
+//! no dynamic allocation, with a conformance-verified frame-size ceiling that
+//! is now the RFC's own 1275-byte frame limit
+//! (`crate::opus_celt::MAX_CELT_FRAME_BYTES`, 510 kbps mono — it was ≈32 kbps
+//! before oxiaudio 0.2.1); SILK is a genuine
+//! analysis-by-synthesis narrowband encoder (NOT silence — measured best-lag
+//! correlation ≈ 0.33–0.67 against reference decode), limited to unvoiced
+//! excitation and independently-coded frames. (SILK silence *is* still accurate
+//! for [`OpusConformantMode::Hybrid`]'s low band specifically — see that
+//! variant's doc.) Prior to oxiaudio 0.2.1 [`encode_opus`]'s default payload
+//! used non-conformant 4-bit placeholder quantization that **no** standard
+//! decoder would accept at all.
+//!
+//! The pre-0.2.1 non-conformant byte layout is preserved verbatim as
+//! [`encode_opus_structural`] / [`encode_opus_structural_file`] for OGG-framing
+//! tests and byte-for-byte compatibility; new code should use [`encode_opus`].
 //!
 //! # TOC byte
 //!
-//! Per RFC 6716 §3.1:
+//! [`encode_opus`] / [`OpusStreamEncoder`] packets carry whatever TOC byte the
+//! selected conformant per-frame encoder emits (`0xF8` for CELT-only fullband
+//! 20 ms mono — see `crate::opus_celt::encode_celt_frame_conformant`; SILK
+//! narrowband packets carry their own TOC — see
+//! `crate::opus_silk_conform::encode_silk_frame_conformant`).
+//!
+//! [`encode_opus_structural`]'s legacy TOC layout, per RFC 6716 §3.1:
 //! ```text
 //! Bits 7-3: config (28 = CELT fullband 20ms, mono; 29 = CELT fullband 20ms, stereo)
 //! Bit  2:   S (stereo if 1)
@@ -27,7 +59,9 @@ use std::io::Write;
 
 use crate::ogg::{write_vorbis_comment_packet, OggStream};
 use crate::opus_celt::encode_celt_frame;
-use crate::opus_celt::encode_celt_frame_conformant;
+use crate::opus_celt::{
+    celt_frame_bytes_for_bitrate, encode_celt_frame_conformant_sized, DEFAULT_CELT_FRAME_BYTES,
+};
 use crate::opus_hybrid_conform::encode_hybrid_frame_conformant;
 use crate::opus_range::RangeEncoder;
 use crate::opus_silk_conform::encode_silk_frame_conformant;
@@ -72,15 +106,59 @@ fn write_opus_head(channels: u8, pre_skip: u16, sample_rate: u32) -> Vec<u8> {
 /// The input buffer must be at 48 kHz (the encoder does NOT resample). Channels
 /// must be 1 (mono) or 2 (stereo).
 ///
-/// The `target_bitrate_kbps` parameter is accepted for API compatibility but is
-/// not yet used by the structural CELT encoder (the current fixed-width quantization
-/// ignores bitrate).
+/// # Conformance
+///
+/// As of oxiaudio 0.2.1 this is a thin wrapper around [`encode_opus_auto`]:
+/// every 20 ms frame is routed through [`select_conformant_mode`] to the
+/// matching RFC 6716–conformant per-frame encoder (CELT or SILK), so the
+/// output is a structurally valid OGG Opus stream whose packets a standard
+/// Opus decoder accepts. `target_bitrate_kbps` now genuinely influences mode
+/// selection (see [`select_conformant_mode`]).
+///
+/// This is **not** a transparent-quality encoder — see [`encode_opus_auto`]'s
+/// docs for the exact, honestly-measured fidelity caveats. For the pre-0.2.1
+/// byte-for-byte non-conformant layout, use [`encode_opus_structural`].
 ///
 /// # Errors
 ///
 /// Returns [`OxiAudioError::UnsupportedFormat`] when channels > 2 or sample rate
 /// is not 48 kHz. Returns [`OxiAudioError::Io`] on write failure.
 pub fn encode_opus<W: Write>(
+    buf: &AudioBuffer<f32>,
+    writer: W,
+    target_bitrate_kbps: u32,
+) -> Result<(), OxiAudioError> {
+    encode_opus_auto(buf, writer, target_bitrate_kbps)
+}
+
+/// Encode an [`AudioBuffer<f32>`] to OGG Opus format using the legacy,
+/// pre-0.2.1 **non-conformant** structural encoder, and write to `writer`.
+///
+/// # Non-conformant — read before use
+///
+/// This function preserves oxiaudio's original [`encode_opus`] byte layout:
+/// correct OGG framing (`OggS` magic, `OpusHead` / `OpusTags` pages, correct
+/// granule positions) but a 4-bit placeholder CELT payload instead of PVQ
+/// (RFC 6716 §4.3.4). **Standard Opus decoders will reject the audio frames.**
+/// It exists only for:
+/// - Exercising the OGG container writer and range coder in isolation.
+/// - Byte-for-byte regression tests against oxiaudio ≤ 0.2.0 output.
+///
+/// New code should call [`encode_opus`] instead, which has been RFC
+/// 6716–conformant (decodable by standard decoders) since oxiaudio 0.2.1.
+///
+/// The input buffer must be at 48 kHz (the encoder does NOT resample). Channels
+/// must be 1 (mono) or 2 (stereo).
+///
+/// The `target_bitrate_kbps` parameter is accepted for API compatibility but is
+/// not used by the structural CELT encoder (the fixed-width quantization
+/// ignores bitrate).
+///
+/// # Errors
+///
+/// Returns [`OxiAudioError::UnsupportedFormat`] when channels > 2 or sample rate
+/// is not 48 kHz. Returns [`OxiAudioError::Io`] on write failure.
+pub fn encode_opus_structural<W: Write>(
     buf: &AudioBuffer<f32>,
     writer: W,
     _target_bitrate_kbps: u32,
@@ -173,6 +251,26 @@ pub fn encode_opus_file(
     encode_opus(buf, writer, target_bitrate_kbps)
 }
 
+/// Encode an [`AudioBuffer<f32>`] to an OGG Opus file at `path` using the legacy
+/// non-conformant structural encoder.
+///
+/// Convenience wrapper around [`encode_opus_structural`]; see that function's
+/// docs for why this is non-conformant and when to use it instead of
+/// [`encode_opus_file`].
+///
+/// # Errors
+///
+/// Returns [`OxiAudioError::Io`] on file-creation failure or write failure.
+pub fn encode_opus_structural_file(
+    buf: &AudioBuffer<f32>,
+    path: &std::path::Path,
+    target_bitrate_kbps: u32,
+) -> Result<(), OxiAudioError> {
+    let file = std::fs::File::create(path).map_err(OxiAudioError::Io)?;
+    let writer = std::io::BufWriter::new(file);
+    encode_opus_structural(buf, writer, target_bitrate_kbps)
+}
+
 /// Selects which RFC 6716–conformant per-frame encoder [`encode_opus_conformant`] uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpusConformantMode {
@@ -181,13 +279,19 @@ pub enum OpusConformantMode {
     /// (>0.1) with a 440 Hz input tone. This is the default — it is the only
     /// conformant mode that encodes actual signal rather than silence.
     Celt,
-    /// SILK-only narrowband 20 ms frames (TOC 0x08). NOTE: the current conformant
-    /// SILK writer emits an inactive zero-excitation (silence) frame — the PCM
-    /// content is NOT encoded. Decodes cleanly but reconstructs silence.
+    /// SILK-only narrowband 20 ms frames (TOC 0x08). A genuine
+    /// analysis-by-synthesis narrowband encoder (`crate::opus_silk_encode`):
+    /// real LP analysis, NLSF VQ, and analysis-by-synthesis excitation coding —
+    /// **not** silence. Measured best-lag correlation ≈ 0.33–0.67 against
+    /// reference decode; limited to unvoiced excitation and
+    /// independently-coded frames (no inter-frame prediction).
     Silk,
-    /// Hybrid fullband 20 ms frames (TOC 0x78): SILK WB silence + CELT high-band.
-    /// Decodes cleanly to 960 samples; low band is silence, high band carries
-    /// CELT content for bands 17–20 only.
+    /// Hybrid fullband 20 ms frames (TOC 0x78): SILK WB **silence** + CELT
+    /// high-band. Unlike [`OpusConformantMode::Silk`] above, the hybrid path
+    /// does not yet route through the real SILK encoder (WB is out of that
+    /// encoder's narrowband-only scope) — its low band genuinely is silence.
+    /// Decodes cleanly to 960 samples; high band carries CELT content for
+    /// bands 17–20 only.
     Hybrid,
 }
 
@@ -201,13 +305,17 @@ pub enum OpusConformantMode {
 /// `opus-decoder` crate).
 ///
 /// # Conformance level (be precise — this is NOT transparent encoding)
-/// - [`OpusConformantMode::Celt`] (default quality): full MDCT + PVQ; decoded
-///   output correlates (>0.1) with the input tone — real spectral content, but
-///   this is only a coarse "not-silence" gate, **not** high-SNR transparency.
-/// - [`OpusConformantMode::Silk`]: **silence-only** — the conformant SILK writer
-///   currently emits an inactive zero-excitation frame and ignores the PCM.
-/// - [`OpusConformantMode::Hybrid`]: low band is silence; high band carries CELT
-///   content for bands 17–20 only.
+/// - [`OpusConformantMode::Celt`] (default quality): full lapped MDCT with
+///   pre-emphasis, real coarse+fine energy and real split-band (`itheta`)
+///   coding. Verified bit-exact against the reference decoder's `final_range`;
+///   per-band decoded level within a few dB of the input. Not transparent —
+///   mono-only, non-transient, neutral allocation.
+/// - [`OpusConformantMode::Silk`]: a genuine analysis-by-synthesis narrowband
+///   encoder — **not** silence — with measured best-lag correlation ≈ 0.33–0.67
+///   against reference decode; unvoiced-only, independently-coded frames.
+/// - [`OpusConformantMode::Hybrid`]: low band genuinely is SILK silence (the
+///   hybrid path doesn't route through the real SILK encoder); high band
+///   carries CELT content for bands 17–20 only.
 ///
 /// All frames are mono. Stereo input is downmixed to mono per frame by averaging
 /// L/R. The OGG `OpusHead` still advertises the input channel count (1 or 2),
@@ -251,6 +359,11 @@ pub fn encode_opus_conformant<W: Write>(
     let frame_samples = FRAME_SIZE * channels;
     let n_frames = buf.samples.len().checked_div(frame_samples).unwrap_or(0);
 
+    // CELT's MDCT is lapped: every frame needs the previous frame as overlap
+    // history or time-domain alias cancellation fails (see
+    // `encode_celt_frame_conformant_with_history`).
+    let mut prev_frame: Vec<f32> = Vec::new();
+
     for i in 0..n_frames {
         let start = i * frame_samples;
         let end = start + frame_samples;
@@ -265,10 +378,13 @@ pub fn encode_opus_conformant<W: Write>(
         let mono: &[f32] = &mono_vec;
 
         let packet = match mode {
-            OpusConformantMode::Celt => encode_celt_frame_conformant(mono, 1),
+            OpusConformantMode::Celt => {
+                encode_celt_frame_conformant_sized(&prev_frame, mono, DEFAULT_CELT_FRAME_BYTES)
+            }
             OpusConformantMode::Silk => encode_silk_frame_conformant(mono, 1),
             OpusConformantMode::Hybrid => encode_hybrid_frame_conformant(mono, 1),
         };
+        prev_frame = mono_vec;
 
         let is_last = i == n_frames - 1;
         stream.write_packet(&packet, FRAME_SIZE as i64, is_last)?;
@@ -284,8 +400,9 @@ pub fn encode_opus_conformant<W: Write>(
 /// Encode an [`AudioBuffer<f32>`] to a conformant OGG Opus file at `path`.
 ///
 /// File-writing convenience wrapper around [`encode_opus_conformant`]; see that
-/// function for the per-mode conformance caveats (SILK is silence-only, CELT is
-/// coarse-gated rather than transparent).
+/// function for the per-mode conformance caveats (SILK is a genuine
+/// analysis-by-synthesis narrowband encoder, not silence; CELT is coarse-gated
+/// rather than transparent; Hybrid's low band specifically is SILK silence).
 ///
 /// # Errors
 /// Returns [`OxiAudioError::Io`] on file-creation or write failure; propagates the
@@ -298,6 +415,186 @@ pub fn encode_opus_conformant_file(
     let file = std::fs::File::create(path).map_err(OxiAudioError::Io)?;
     let writer = std::io::BufWriter::new(file);
     encode_opus_conformant(buf, writer, mode)
+}
+
+/// Root-mean-square² (mean energy) below which a frame is treated as silence.
+///
+/// `1e-7` ≈ −70 dBFS, comfortably below audible content. Silent frames are routed
+/// to the SILK path, which emits a compact inactive frame that any RFC 6716
+/// decoder reconstructs to (near-)silence.
+const SILENCE_ENERGY_THRESHOLD: f32 = 1e-7;
+
+/// Ratio of first-difference energy to total energy above which a frame is treated
+/// as high-frequency ("music"-like) content and routed to CELT rather than SILK.
+///
+/// For a pure tone at frequency `f` (48 kHz), this ratio is `≈ (2·sin(π f / fs))²`:
+/// ~0.017 at 1 kHz, ~0.07 at 2 kHz, ~0.27 at 4 kHz. SILK's narrowband internal
+/// rate only reaches ~4 kHz, so content whose energy sits mostly above that is far
+/// better served by CELT. `0.06` puts the crossover near ~1.9 kHz.
+const HF_RATIO_CELT_THRESHOLD: f32 = 0.06;
+
+/// Bitrate (kbps) at or below which SILK narrowband is preferred for low-frequency
+/// content, mirroring real Opus mode selection (SILK dominates below ~14 kbps).
+const SILK_BITRATE_CEILING_KBPS: u32 = 20;
+
+/// Choose the RFC 6716–conformant per-frame mode for one mono 20 ms frame.
+///
+/// The selection mirrors the coarse structure of a real Opus encoder's mode
+/// decision, adapted to what this crate can encode *with real signal content*
+/// (both [`OpusConformantMode::Celt`] and [`OpusConformantMode::Silk`] reconstruct
+/// the input; [`OpusConformantMode::Hybrid`]'s low band is silence, so it is never
+/// auto-selected):
+///
+/// * **Silence** (`mean energy < SILENCE_ENERGY_THRESHOLD`) → SILK. The SILK
+///   inactive frame is the cheapest conformant silence representation.
+/// * **Low-frequency, low-bitrate** speech-band content (first-difference energy
+///   ratio below `HF_RATIO_CELT_THRESHOLD` and `target_bitrate_kbps ≤
+///   SILK_BITRATE_CEILING_KBPS`) → SILK narrowband.
+/// * **Everything else** (music, high tones, higher bitrates) → CELT fullband.
+///
+/// `mono` is a single-channel 48 kHz frame (any length; only its spectral balance
+/// and energy are inspected).
+pub fn select_conformant_mode(mono: &[f32], target_bitrate_kbps: u32) -> OpusConformantMode {
+    let n = mono.len().max(1);
+    let energy: f32 = mono.iter().map(|&x| x * x).sum::<f32>() / n as f32;
+    if energy < SILENCE_ENERGY_THRESHOLD {
+        return OpusConformantMode::Silk;
+    }
+
+    // First-difference energy as a cheap high-frequency proxy (no FFT required).
+    let mut diff_energy = 0.0f32;
+    let mut total_energy = 0.0f32;
+    for w in mono.windows(2) {
+        let d = w[1] - w[0];
+        diff_energy += d * d;
+        total_energy += w[0] * w[0];
+    }
+    total_energy += mono.last().map(|&x| x * x).unwrap_or(0.0);
+    let hf_ratio = if total_energy > 0.0 {
+        diff_energy / total_energy
+    } else {
+        0.0
+    };
+
+    if hf_ratio < HF_RATIO_CELT_THRESHOLD && target_bitrate_kbps <= SILK_BITRATE_CEILING_KBPS {
+        OpusConformantMode::Silk
+    } else {
+        OpusConformantMode::Celt
+    }
+}
+
+/// Full RFC 6716–conformant Opus encode path with **automatic per-frame mode
+/// selection**, writing an OGG Opus stream to `writer`.
+///
+/// This is the top-level "wire it all together" encoder: for every 20 ms frame it
+/// calls [`select_conformant_mode`] and routes the frame through the matching
+/// conformant per-frame encoder (SILK narrowband or CELT fullband), so a single
+/// stream may mix SILK and CELT packets frame-to-frame (legal in Opus — each
+/// packet carries its own TOC). Stereo input is downmixed to mono per frame, as in
+/// [`encode_opus_conformant`]; the `OpusHead` still advertises the input channel
+/// count.
+///
+/// # Conformance (honest scope — this is not a transparent encoder)
+///
+/// Every emitted packet is accepted by the reference `opus-decoder`, and for
+/// CELT frames the encoder's and decoder's `final_range` registers agree —
+/// i.e. both sides consumed byte-for-byte the same symbol sequence.
+/// `target_bitrate_kbps` genuinely sets the CELT payload size via
+/// [`crate::opus_celt::celt_frame_bytes_for_bitrate`] (clamped to the
+/// conformance-verified ceiling), and each frame is analysed with the previous
+/// frame as lapped-MDCT overlap history.
+///
+/// Reconstruction is still *approximate*: SILK frames are band-limited
+/// narrowband with a bounded greedy pulse search; CELT is mono-only,
+/// non-transient and uses a neutral (non-dynalloc) allocation. See the
+/// per-frame encoder modules for the measured fidelity picture.
+///
+/// # Errors
+/// Returns [`OxiAudioError::UnsupportedFormat`] when channels are outside 1..=2 or
+/// the sample rate is not 48 kHz; [`OxiAudioError::Io`] on write failure.
+pub fn encode_opus_auto<W: Write>(
+    buf: &AudioBuffer<f32>,
+    writer: W,
+    target_bitrate_kbps: u32,
+) -> Result<(), OxiAudioError> {
+    let channels = buf.channels.channel_count();
+
+    if channels == 0 || channels > 2 {
+        return Err(OxiAudioError::UnsupportedFormat(format!(
+            "Opus encoder supports 1–2 channels, got {channels}"
+        )));
+    }
+    if buf.sample_rate != OPUS_SAMPLE_RATE {
+        return Err(OxiAudioError::UnsupportedFormat(format!(
+            "Opus encoder requires 48 kHz input, got {} Hz",
+            buf.sample_rate
+        )));
+    }
+
+    let serial: u32 = 0x1234_5678;
+    let mut stream = OggStream::new(writer, serial);
+
+    let head = write_opus_head(channels as u8, PRE_SKIP, buf.sample_rate);
+    stream.write_packet(&head, 0, false)?;
+
+    let tags =
+        write_vorbis_comment_packet(concat!("OxiAudio ", env!("CARGO_PKG_VERSION")), &[], true);
+    stream.write_packet(&tags, 0, false)?;
+
+    let frame_samples = FRAME_SIZE * channels;
+    let n_frames = buf.samples.len().checked_div(frame_samples).unwrap_or(0);
+    let celt_bytes = celt_frame_bytes_for_bitrate(target_bitrate_kbps);
+
+    // Lapped-MDCT overlap history for the CELT path (see `encode_opus_conformant`).
+    let mut prev_frame: Vec<f32> = Vec::new();
+
+    for i in 0..n_frames {
+        let start = i * frame_samples;
+        let end = start + frame_samples;
+        let pcm = &buf.samples[start..end];
+
+        let mono_vec: Vec<f32> = if channels == 2 {
+            pcm.chunks_exact(2).map(|c| 0.5 * (c[0] + c[1])).collect()
+        } else {
+            pcm.to_vec()
+        };
+        let mono: &[f32] = &mono_vec;
+
+        let mode = select_conformant_mode(mono, target_bitrate_kbps);
+        let packet = match mode {
+            OpusConformantMode::Celt => {
+                encode_celt_frame_conformant_sized(&prev_frame, mono, celt_bytes)
+            }
+            OpusConformantMode::Silk => encode_silk_frame_conformant(mono, 1),
+            OpusConformantMode::Hybrid => encode_hybrid_frame_conformant(mono, 1),
+        };
+        prev_frame = mono_vec;
+
+        let is_last = i == n_frames - 1;
+        stream.write_packet(&packet, FRAME_SIZE as i64, is_last)?;
+    }
+
+    stream
+        .finish()
+        .map_err(|_| OxiAudioError::Io(std::io::Error::other("OGG stream finish failed")))?;
+
+    Ok(())
+}
+
+/// Encode an [`AudioBuffer<f32>`] to an OGG Opus file at `path` using the automatic
+/// full encode path ([`encode_opus_auto`]).
+///
+/// # Errors
+/// Returns [`OxiAudioError::Io`] on file-creation or write failure; propagates the
+/// validation errors of [`encode_opus_auto`].
+pub fn encode_opus_auto_file(
+    buf: &AudioBuffer<f32>,
+    path: &std::path::Path,
+    target_bitrate_kbps: u32,
+) -> Result<(), OxiAudioError> {
+    let file = std::fs::File::create(path).map_err(OxiAudioError::Io)?;
+    let writer = std::io::BufWriter::new(file);
+    encode_opus_auto(buf, writer, target_bitrate_kbps)
 }
 
 /// Configuration for Opus encoding.
@@ -334,12 +631,27 @@ impl OpusEncodeConfig {
 ///
 /// Each call to [`OpusStreamEncoder::encode_frame`] encodes exactly
 /// [`FRAME_SIZE`] samples per channel and writes one OGG packet.
+///
+/// # Conformance
+///
+/// As of oxiaudio 0.2.1 each frame is routed through the RFC 6716–conformant
+/// CELT-only per-frame encoder **with lapped-MDCT overlap history** (the
+/// previous frame is retained across calls), so time-domain alias cancellation
+/// actually works across a stream. Use [`OpusStreamEncoder::with_bitrate`] to
+/// set the per-frame payload size. Stereo input is downmixed to mono per frame
+/// before encoding (the `OpusHead` page still advertises the constructor's
+/// `channels` value, matching the documented asymmetry of
+/// [`encode_opus_conformant`]). This is not a transparent-quality encoder —
+/// see `crate::opus_celt`'s module doc for the measured caveats.
 pub struct OpusStreamEncoder<W: Write> {
     stream: OggStream<W>,
     channels: usize,
     granule_pos: i64,
-    toc: u8,
     is_finalized: bool,
+    /// Previous mono frame, kept as CELT lapped-MDCT overlap history.
+    prev_frame: Vec<f32>,
+    /// CBR payload size per frame, derived from the configured bitrate.
+    celt_bytes: usize,
 }
 
 impl<W: Write> OpusStreamEncoder<W> {
@@ -362,14 +674,36 @@ impl<W: Write> OpusStreamEncoder<W> {
         let tags =
             write_vorbis_comment_packet(concat!("OxiAudio ", env!("CARGO_PKG_VERSION")), &[], true);
         stream.write_packet(&tags, 0, false)?;
-        let toc: u8 = (28u8 << 3) | (if channels == 2 { 0x04 } else { 0x00 });
         Ok(Self {
             stream,
             channels,
             granule_pos: 0,
-            toc,
             is_finalized: false,
+            prev_frame: Vec::new(),
+            celt_bytes: DEFAULT_CELT_FRAME_BYTES,
         })
+    }
+
+    /// Create a streaming encoder with an explicit target bitrate.
+    ///
+    /// The per-frame CBR payload size is derived with
+    /// [`celt_frame_bytes_for_bitrate`], so the request genuinely changes the
+    /// emitted rate (clamped to the conformance-verified range, which now runs
+    /// all the way to the RFC's 1275-byte frame limit — see
+    /// `crate::opus_celt::MAX_CELT_FRAME_BYTES`).
+    ///
+    /// # Errors
+    /// Returns [`OxiAudioError::UnsupportedFormat`] if `channels` > 2.
+    /// Returns [`OxiAudioError::Io`] on write failure.
+    pub fn with_bitrate(
+        writer: W,
+        channels: usize,
+        serial: u32,
+        target_bitrate_kbps: u32,
+    ) -> Result<Self, OxiAudioError> {
+        let mut enc = Self::new(writer, channels, serial)?;
+        enc.celt_bytes = celt_frame_bytes_for_bitrate(target_bitrate_kbps);
+        Ok(enc)
     }
 
     /// Encode one audio frame of exactly `FRAME_SIZE * channels` samples.
@@ -386,12 +720,17 @@ impl<W: Write> OpusStreamEncoder<W> {
                 pcm.len()
             )));
         }
-        let mut enc = RangeEncoder::new();
-        encode_celt_frame(pcm, self.channels, &mut enc);
-        let frame_bytes = enc.finish();
-        let mut packet = Vec::with_capacity(1 + frame_bytes.len());
-        packet.push(self.toc);
-        packet.extend_from_slice(&frame_bytes);
+        // Downmix to mono for the conformant CELT per-frame encoder, matching
+        // encode_opus_conformant / encode_opus_auto's documented asymmetry: the
+        // OpusHead still advertises `self.channels`, but per-frame content is mono.
+        let mono_vec: Vec<f32> = if self.channels == 2 {
+            pcm.chunks_exact(2).map(|c| 0.5 * (c[0] + c[1])).collect()
+        } else {
+            pcm.to_vec()
+        };
+        let packet =
+            encode_celt_frame_conformant_sized(&self.prev_frame, &mono_vec, self.celt_bytes);
+        self.prev_frame = mono_vec;
         self.granule_pos += FRAME_SIZE as i64;
         self.stream
             .write_packet(&packet, FRAME_SIZE as i64, false)?;
@@ -434,8 +773,8 @@ mod tests {
     use oxiaudio_core::{AudioBuffer, ChannelLayout, SampleFormat};
 
     use super::{
-        encode_opus, encode_opus_conformant, OpusConformantMode, OpusEncodeConfig,
-        OpusStreamEncoder, FRAME_SIZE,
+        encode_opus, encode_opus_conformant, encode_opus_structural, OpusConformantMode,
+        OpusEncodeConfig, OpusStreamEncoder, FRAME_SIZE,
     };
 
     fn silence_buf(channels: usize, frames: usize) -> AudioBuffer<f32> {
@@ -564,6 +903,18 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read test file");
         assert_eq!(&bytes[..4], b"OggS", "file must start with OggS magic");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_encode_opus_structural_produces_valid_ogg_output() {
+        // The legacy non-conformant path must still work byte-structurally
+        // (OGG framing) even though its payload is not RFC 6716–conformant.
+        let buf = silence_buf(2, 1);
+        let mut out = Cursor::new(Vec::new());
+        encode_opus_structural(&buf, &mut out, 128).expect("encode_opus_structural stereo silence");
+        let bytes = out.into_inner();
+        assert!(!bytes.is_empty(), "output must not be empty");
+        assert_eq!(&bytes[..4], b"OggS", "output must start with OggS magic");
     }
 
     #[test]

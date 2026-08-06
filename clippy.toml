@@ -1,0 +1,22 @@
+# clippy.toml — pinned lint configuration for the OxiAudio workspace.
+
+# Matches `[workspace.package].rust-version` in Cargo.toml. This makes clippy
+# flag any construct that isn't available on the workspace's stated MSRV
+# (e.g. `clippy::incompatible_msrv`), and also tunes suggestions such as
+# `manual_let_else` / `manual_strip` to only fire when the suggested
+# replacement is actually usable at 1.80.
+msrv = "1.80"
+
+# Deliberately NOT set: `disallowed-methods` for `Option::unwrap` /
+# `Result::unwrap` / `.expect()`.
+#
+# COOLJAPAN policy bans `unwrap()`/`expect()` in *production* code, but
+# `clippy::disallowed_methods` has no notion of "production vs. test code" —
+# it is warn-by-default workspace-wide as soon as this file lists any
+# methods, and `cargo clippy --all-targets` compiles `#[cfg(test)]` modules,
+# `tests/*.rs`, and `benches/*.rs` too. Enabling it here would turn every
+# legitimate `.unwrap()`/`.expect()` in the (extensive, and correct) test
+# suites into a new clippy warning, which would violate the zero-warnings
+# bar rather than enforce it. The production-code rule is enforced by
+# review/audit instead (verified: zero non-test `.unwrap()`/`.expect(` across
+# all `crates/*/src` as of the 2026-08 production audit).

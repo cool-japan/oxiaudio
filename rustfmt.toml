@@ -1,0 +1,18 @@
+# rustfmt.toml — pinned formatting configuration for the OxiAudio workspace.
+#
+# Deliberately minimal: with NO config file at all, `cargo fmt --all --check`
+# against the committed baseline produces zero diffs across all ~55k lines of
+# `crates/*/src` — the codebase already conforms to rustfmt's stable-channel
+# defaults. This file exists to pin the house style explicitly (so a direct
+# `rustfmt` invocation outside `cargo fmt`, or a future rustfmt version with
+# different defaults, can't silently drift) rather than to change any
+# formatting behavior.
+#
+# Only the `edition` key is set — it matches `[workspace.package].edition` in
+# Cargo.toml. `cargo fmt` already infers this per-crate from each member's
+# Cargo.toml, but pinning it here too keeps a bare `rustfmt <file>` invocation
+# consistent. No other keys are set: adding settings that diverge from
+# rustfmt's stable defaults would trigger a repo-wide reformat, which is out
+# of scope for a hygiene rollout (see CLAUDE.md: never reformat prior work
+# away).
+edition = "2021"

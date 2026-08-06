@@ -1,7 +1,12 @@
 # oxiaudio-encode-mp3-lame TODO
 
 ## Status
-BOUNDED_FFI MP3 encoder via LAME (mp3lame-encoder 0.2.4). Supports CBR (64/128/192/320 kbps), VBR (quality V0-V9 via MTRH mode), all MPEG channel modes (stereo/joint-stereo/dual-channel/mono). Includes hand-rolled ID3v2.3 tag writer (TIT2, TPE1, TALB, TRCK, TYER). Both one-shot `LameMp3Encoder` and streaming `LameMp3StreamEncoder` with ID3 prepend. Feature-gated behind `mp3-encode-lame` (LGPL, links libmp3lame). M0-M4 complete. Approximately 492 SLOC including tests.
+BOUNDED_FFI MP3 encoder via LAME (mp3lame-encoder 0.2.4). Supports CBR (64/128/192/320 kbps), VBR (quality V0-V9 via MTRH mode), all MPEG channel modes (stereo/joint-stereo/dual-channel/mono). Includes hand-rolled ID3v2.3 tag writer (TIT2, TPE1, TALB, TRCK, TYER). Both one-shot `LameMp3Encoder` and streaming `LameMp3StreamEncoder` with ID3 prepend. Feature-gated behind `mp3-encode-lame` (LGPL, links libmp3lame); with the feature off the crate is
+plain Rust with no C linkage and exposes only `compute_replaygain_gain_approx`. M0–M23 complete —
+also ID3v2.4 (APIC / USLT / ReplayGain TXXX) and gapless playback (Xing/LAME + iTunSMPB).
+1,833 SLOC of production code across 7 source files in `src/`
+(`tokei crates/oxiaudio-encode-mp3-lame/src`, Code column, measured 2026-08-06); 3 tests passing
+with default features (the FFI-independent surface) and 82 with `--all-features`.
 
 ## Core Implementation
 

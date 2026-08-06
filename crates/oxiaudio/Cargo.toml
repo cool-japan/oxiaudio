@@ -34,3 +34,14 @@ criterion = { workspace = true }
 [[bench]]
 name = "facade_bench"
 harness = false
+
+# Both example files use decode_file/encode_wav/encode_flac/dsp::*/TranscodeStream,
+# all gated behind the `pure` feature (see [features] above) — without this,
+# `cargo build --no-default-features --all-targets` fails to resolve them.
+[[example]]
+name = "decode_dsp_encode"
+required-features = ["pure"]
+
+[[example]]
+name = "streaming_transcode"
+required-features = ["pure"]

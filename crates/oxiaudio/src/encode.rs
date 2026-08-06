@@ -99,10 +99,23 @@ pub use oxiaudio_encode::SilkBandwidth;
 /// SILK LP frame structure (NLSFs, residual, pitch, gain).
 pub use oxiaudio_encode::SilkLpcFrame;
 
-/// Analyze a PCM frame and extract SILK LP parameters (structural stub).
+/// Analyze a PCM frame and extract SILK LP parameters via real LP analysis
+/// (autocorrelation, Levinson-Durbin, LPC→NLSF, pitch/LTP estimation, noise
+/// shaping — see `oxiaudio_encode`'s `opus_silk` module doc for the algorithm
+/// pipeline).
+///
+/// This is a standalone LP-analysis frontend, distinct from the RFC
+/// 6716–conformant SILK path used by [`encode_opus_conformant`] /
+/// [`encode_opus`] (`OpusConformantMode::Silk`, backed by
+/// `oxiaudio_encode::opus_silk_encode`'s analysis-by-synthesis encoder).
 pub use oxiaudio_encode::analyze_silk_frame;
 
-/// Encode a SILK LP frame to bytes (structural stub).
+/// Encode a [`SilkLpcFrame`] to bytes using compact uniform coding via the
+/// Opus range coder (gain/pitch/NLSF/LTP each range-coded as raw uniform
+/// symbols — not the RFC 6716 §5 SILK iCDF bitstream layout, so the output is
+/// **not** decodable by a standard SILK/Opus decoder). For a packet a
+/// standard decoder accepts, use [`encode_opus_conformant`] with
+/// `OpusConformantMode::Silk` instead.
 pub use oxiaudio_encode::encode_silk_frame;
 
 /// Encode an `AudioBuffer<f32>` to an OGG Vorbis file at `path`.
@@ -365,11 +378,27 @@ pub fn encode_aiff_with_chunks(
 /// Encode an [`AudioBuffer<f32>`] to OGG Opus format (48 kHz, 1–2 channels only).
 ///
 /// Writes an OGG Opus stream with `OpusHead` and `OpusTags` header pages followed
-/// by CELT-mode audio frames. The `target_bitrate_kbps` parameter is accepted for
-/// API compatibility but is not used by the current structural encoder.
+/// by audio frames. As of oxiaudio 0.2.1 this delegates to the RFC
+/// 6716–conformant automatic mode-selection path (equivalent to
+/// `oxiaudio_encode::encode_opus_auto`): every 20 ms frame is routed through the
+/// matching conformant per-frame encoder (CELT or SILK), so the emitted stream
+/// is decodable by standard Opus decoders. `target_bitrate_kbps` genuinely
+/// influences both per-frame mode selection and the CELT payload size, and each
+/// frame is analysed with the previous frame as lapped-MDCT overlap history.
 ///
-/// **Note**: The current CELT implementation uses non-conformant 4-bit placeholder
-/// quantization and will not produce decodable output for standard Opus decoders.
+/// Conformance is verified rather than assumed: the CELT bitstream's
+/// `final_range` register matches the reference decoder's for every supported
+/// frame size (the canonical libopus check).
+///
+/// **Note**: this is not a transparent-quality encoder — CELT is mono-only
+/// (stereo is downmixed), non-transient and uses a neutral allocation. It is
+/// capped at `oxiaudio_encode::opus_celt::MAX_CELT_FRAME_BYTES`, which as of
+/// oxiaudio 0.2.1 is the RFC's own 1275-byte frame limit (510 kbps mono) rather
+/// than the ≈32 kbps ceiling that bit-exactness used to stop at. See
+/// [`encode_opus_conformant`]'s
+/// per-mode fidelity caveats, which apply equally here. For the pre-0.2.1
+/// non-conformant byte layout (kept for byte-for-byte compatibility /
+/// OGG-framing tests), use `encode_opus_structural`.
 pub use oxiaudio_encode::encode_opus;
 
 /// Encode an [`AudioBuffer<f32>`] to an OGG Opus file at `path`.
@@ -377,36 +406,50 @@ pub use oxiaudio_encode::encode_opus;
 /// Convenience wrapper around [`encode_opus`].
 pub use oxiaudio_encode::encode_opus_file;
 
+/// Encode an [`AudioBuffer<f32>`] to OGG Opus using the pre-0.2.1
+/// **non-conformant** structural encoder (4-bit placeholder CELT payload,
+/// rejected by standard decoders). Preserved for byte-for-byte compatibility
+/// and OGG-framing-only tests; new code should use [`encode_opus`], which has
+/// been RFC 6716–conformant since 0.2.1.
+pub use oxiaudio_encode::encode_opus_structural;
+
+/// Encode an [`AudioBuffer<f32>`] to an OGG Opus file at `path` using the
+/// pre-0.2.1 non-conformant structural encoder. See `encode_opus_structural`.
+pub use oxiaudio_encode::encode_opus_structural_file;
+
 /// Mode selector for [`encode_opus_conformant`] — chooses the conformant
 /// per-frame Opus encoder (CELT, SILK, or Hybrid).
 pub use oxiaudio_encode::OpusConformantMode;
 
 /// Encode an [`AudioBuffer<f32>`] to OGG Opus using the **RFC 6716–conformant**
-/// per-frame encoders (opt-in alternative to [`encode_opus`]).
+/// per-frame encoders with an explicit, caller-chosen mode (as opposed to
+/// [`encode_opus`]'s automatic per-frame mode selection).
 ///
-/// Unlike [`encode_opus`] (which uses a non-conformant 4-bit placeholder CELT
-/// path), this routes each 20 ms frame through a conformant SILK/CELT/Hybrid
+/// This routes each 20 ms frame through a conformant SILK/CELT/Hybrid
 /// writer, producing an OGG Opus stream that standard Opus decoders accept.
 ///
 /// # Conformance level (measured against the `opus-decoder` reference crate)
 /// - [`OpusConformantMode::Celt`] (default-quality): full MDCT + PVQ; decoded
 ///   output correlates (>0.1) with the input tone — real spectral content, but
 ///   this is a coarse "not-silence" gate, **not** high-SNR transparency.
-/// - [`OpusConformantMode::Silk`]: **silence-only** — the conformant SILK writer
-///   currently emits an inactive zero-excitation frame and ignores PCM content.
-/// - [`OpusConformantMode::Hybrid`]: low band silence + CELT high-band (bands 17–20).
+/// - [`OpusConformantMode::Silk`]: a genuine analysis-by-synthesis narrowband
+///   encoder (real LP analysis, NLSF VQ, and analysis-by-synthesis excitation
+///   coding — **not** silence), measured best-lag correlation ≈ 0.33–0.67
+///   against reference decode. Limited to unvoiced excitation and
+///   independently-coded frames (no inter-frame prediction).
+/// - [`OpusConformantMode::Hybrid`]: low band is SILK **silence** (the hybrid
+///   path does not yet use the real SILK encoder) + CELT high-band (bands 17–20).
 ///
 /// Audio frames are mono; stereo input is downmixed to mono per frame (the OGG
 /// `OpusHead` still advertises the input channel count, matching [`encode_opus`]).
-///
-/// [`encode_opus`] and its byte output are unaffected by this function.
 pub use oxiaudio_encode::encode_opus_conformant;
 
 /// Encode an [`AudioBuffer<f32>`] to a conformant OGG Opus file at `path`.
 ///
 /// File-writing convenience wrapper around [`encode_opus_conformant`]; see that
-/// function for the per-mode conformance caveats (SILK is silence-only, CELT is
-/// coarse-gated, not transparent).
+/// function for the per-mode conformance caveats (SILK is a genuine
+/// analysis-by-synthesis narrowband encoder, not silence; CELT is coarse-gated,
+/// not transparent; Hybrid's low band specifically is SILK silence).
 pub use oxiaudio_encode::encode_opus_conformant_file;
 
 // ─── M19 — FLAC MD5 verification ─────────────────────────────────────────────

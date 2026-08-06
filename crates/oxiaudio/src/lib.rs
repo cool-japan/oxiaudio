@@ -202,6 +202,9 @@ pub use encode::{
     encode_opus_conformant,
     encode_opus_conformant_file,
     encode_opus_file,
+    // Legacy pre-0.2.1 non-conformant structural Opus encoder (byte-compat only)
+    encode_opus_structural,
+    encode_opus_structural_file,
     encode_silk_frame,
     encode_stream,
     encode_stream_flac,

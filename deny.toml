@@ -13,6 +13,58 @@ deny = [
   { name = "flac-sys" },
   { name = "flac-bound" },
   { name = "vorbis-sys" },
+
+  # --- COOLJAPAN Pure Rust Policy: banned BLAS / FFT / serialization ---
+  # (see ~/.claude/CLAUDE.md "Dependency Replacements" table)
+  # Use oxiblas instead of any OpenBLAS C binding.
+  { name = "openblas-src" },
+  { name = "openblas-sys" },
+  # Use oxicode instead of bincode.
+  { name = "bincode" },
+  # Use oxisql-sqlite-compat instead of rusqlite / raw libsqlite3.
+  { name = "rusqlite" },
+  { name = "libsqlite3-sys" },
+  # Use oxixml-* instead of quick-xml (not currently in this workspace's
+  # graph at all -- verified: no XML dependency or hand-rolled XML/SVG
+  # parsing exists anywhere in oxiaudio as of the 2026-08 production audit).
+  { name = "quick-xml" },
+
+  # Use OxiFFT instead of rustfft. Denied as a *direct* dependency (no
+  # oxiaudio-* crate depends on rustfft directly -- verified via
+  # `cargo tree -i rustfft --all-features`). It is an accepted, scoped
+  # transitive of `rubato` (workspace resampling dependency, used in
+  # oxiaudio-dsp for sample-rate conversion): rubato -> realfft -> rustfft.
+  # `oxifft` (the COOLJAPAN replacement) IS already a workspace dependency
+  # and is used directly elsewhere in oxiaudio-dsp/oxiaudio-encode/
+  # oxiaudio-decode for spectral analysis and MDCT, so this exception does
+  # NOT mean rustfft is used for anything except rubato's internal
+  # resampling kernel. Re-check date: 2026-11-01 -- by then, either replace
+  # rubato's polyphase/sinc resampler with an oxifft-based implementation in
+  # oxiaudio-dsp (closes this exception entirely), or renew this comment.
+  # Naming `realfft` (rustfft's direct parent per `cargo tree -i rustfft`)
+  # as the wrapper keeps the ban fully active for any *new* direct
+  # dependency on rustfft, including from oxiaudio crates themselves.
+  { name = "rustfft", wrappers = ["realfft"] },
+
+  # --- COOLJAPAN Pure Rust Policy: C-bound compression, replaced by oxiarc-* ---
+  # None of these currently appear anywhere in oxiaudio's resolved graph
+  # (direct or transitive, `--all-features`) as of this file's authoring;
+  # listed with no `wrappers` so they hard-fail the moment anything (even
+  # transitively) pulls one in, rather than silently reappearing.
+  { name = "zip" },
+  { name = "flate2" },
+  { name = "zstd" },
+  { name = "zstd-sys" },
+  { name = "bzip2" },
+  { name = "bzip2-sys" },
+  { name = "lz4" },
+  { name = "lz4-sys" },
+  { name = "lz4_flex" },
+  { name = "tar" },
+  { name = "snap" },
+  { name = "brotli" },
+  { name = "brotli-sys" },
+  { name = "miniz_oxide" },
 ]
 
 [sources]

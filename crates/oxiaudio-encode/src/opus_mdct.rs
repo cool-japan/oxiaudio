@@ -19,16 +19,23 @@ pub const FRAME_SIZE: usize = 960;
 /// Applies a sine window, pre-rotates the signal, computes a `FRAME_SIZE/2`-point complex FFT
 /// via OxiFFT, then post-rotates to obtain real MDCT coefficients.
 ///
-/// # Panics
-///
-/// Panics in debug mode if `samples.len() != FRAME_SIZE`.
+/// `samples` need not be exactly [`FRAME_SIZE`] long: shorter input is zero-padded
+/// and longer input is truncated (a single `Vec::resize`), so this function is
+/// infallible and panic-free for any input length. This mirrors the
+/// tolerant-length convention already used by the conformant CELT path
+/// (`encode_celt_frame_conformant` in `opus_celt.rs`), and matters because this
+/// is a `pub fn` on a `pub mod` reachable by any external caller with no
+/// length guarantee on their buffer.
 pub fn mdct_forward(samples: &[f32]) -> Vec<f32> {
-    assert_eq!(
-        samples.len(),
-        FRAME_SIZE,
-        "mdct_forward: expected {FRAME_SIZE} samples, got {}",
-        samples.len()
-    );
+    let owned;
+    let samples: &[f32] = if samples.len() == FRAME_SIZE {
+        samples
+    } else {
+        let mut v = samples.to_vec();
+        v.resize(FRAME_SIZE, 0.0);
+        owned = v;
+        &owned
+    };
 
     let n = FRAME_SIZE;
     let n2 = n / 2; // 480
@@ -208,6 +215,226 @@ pub const CELT_WINDOW_120: [f32; 120] = [
     1.0000000,
 ];
 
+/// CELT MDCT geometry: number of spectral bins produced per 20 ms frame.
+pub const CELT_MDCT_BINS: usize = 960;
+
+/// CELT MDCT geometry: length of the lapped analysis block (`2 · CELT_MDCT_BINS`).
+const CELT_MDCT_BLOCK: usize = 2 * CELT_MDCT_BINS;
+
+/// CELT low-overlap transition length in samples (RFC 6716 §4.3.7).
+const CELT_OVERLAP: usize = 120;
+
+/// Analysis-window value at block position `m` of the 1920-sample lapped block.
+///
+/// The CELT low-overlap window is 1 across the central `2N − 2·(N/2 − overlap/2)`
+/// samples and tapers over `overlap` samples centred on `N/2` and `3N/2`
+/// (RFC 6716 §4.3.7 / libopus `celt/modes.c`):
+///
+/// ```text
+/// m ∈ [0,   420) → 0                       (zero-padded left tail)
+/// m ∈ [420, 540) → CELT_WINDOW_120[m − 420] (rising)
+/// m ∈ [540, 1380) → 1                       (flat)
+/// m ∈ [1380, 1500) → CELT_WINDOW_120[1499 − m] (falling)
+/// m ∈ [1500, 1920) → 0                      (zero-padded right tail)
+/// ```
+fn celt_lapped_window(m: usize) -> f32 {
+    const FLAT_LO: usize = CELT_MDCT_BINS / 2 - CELT_OVERLAP / 2; // 420
+    const RISE_HI: usize = FLAT_LO + CELT_OVERLAP; // 540
+    const FALL_LO: usize = 3 * CELT_MDCT_BINS / 2 - CELT_OVERLAP / 2; // 1380
+    const FALL_HI: usize = FALL_LO + CELT_OVERLAP; // 1500
+    if !(FLAT_LO..FALL_HI).contains(&m) {
+        0.0
+    } else if m < RISE_HI {
+        CELT_WINDOW_120[m - FLAT_LO]
+    } else if m < FALL_LO {
+        1.0
+    } else {
+        CELT_WINDOW_120[FALL_HI - 1 - m]
+    }
+}
+
+/// Naive reference MDCT used to validate [`celt_mdct_960_overlap`]'s fast path.
+///
+/// Evaluates the defining sum directly:
+/// `X[k] = Σ_m w[m]·x[m]·cos(π/N·(m + ½ + N/2)·(k + ½))`.
+#[cfg(test)]
+fn celt_mdct_960_overlap_naive(prev: &[f32], cur: &[f32]) -> Vec<f32> {
+    const N: usize = CELT_MDCT_BINS;
+    let block: Vec<f32> = (0..CELT_MDCT_BLOCK)
+        .map(|m| {
+            let s = if m < N {
+                prev.get(m).copied().unwrap_or(0.0)
+            } else {
+                cur.get(m - N).copied().unwrap_or(0.0)
+            };
+            s * celt_lapped_window(m)
+        })
+        .collect();
+    (0..N)
+        .map(|k| {
+            let mut acc = 0.0f64;
+            for (m, &v) in block.iter().enumerate() {
+                if v == 0.0 {
+                    continue;
+                }
+                let phase = std::f64::consts::PI / N as f64
+                    * (m as f64 + 0.5 + N as f64 / 2.0)
+                    * (k as f64 + 0.5);
+                acc += v as f64 * phase.cos();
+            }
+            acc as f32
+        })
+        .collect()
+}
+
+/// CELT pre-emphasis coefficient (libopus `mode->preemph[0]` at 48 kHz).
+///
+/// The encoder applies `p[n] = x[n] − COEF·x[n−1]`; the decoder's mandatory
+/// de-emphasis (`y[n] = p[n] + COEF·y[n−1]`) is its exact inverse. Skipping
+/// pre-emphasis on the analysis side leaves the decoder's low-pass de-emphasis
+/// uncompensated, which tilts the reconstruction by ~11× from 100 Hz to
+/// 18 kHz — audible as a heavily muffled decode even when every coded field is
+/// bit-exact.
+pub const CELT_PREEMPH_COEF: f32 = 0.850_006_1;
+
+/// CELT internal signal scale (`CELT_SIG_SCALE` in libopus).
+///
+/// libopus runs CELT in a ±32768 signal domain and the reference decoder
+/// divides its `i16` output by 32768 to produce floats.
+const CELT_SIG_SCALE: f32 = 32768.0;
+
+/// Analysis gain that puts [`celt_analysis_spectrum`]'s output in the same
+/// domain as the reference decoder's `denormalise_bands` input.
+///
+/// Two factors combine:
+/// * `CELT_SIG_SCALE` — the ±32768 internal domain described above.
+/// * `2 / CELT_MDCT_BINS` — the MDCT normalisation. [`celt_mdct_960_overlap`]
+///   evaluates the unnormalised defining sum, while the decoder's
+///   `clt_mdct_backward` is likewise unnormalised, so the whole `2/N` of the
+///   analysis/synthesis pair has to live on the analysis side.
+///
+/// Verified end-to-end by `tests/m_opus_celt_snr.rs`, which asserts the decoded
+/// level matches the input within ±2 dB across tones and noise.
+const CELT_ANALYSIS_GAIN: f32 = CELT_SIG_SCALE * 2.0 / CELT_MDCT_BINS as f32;
+
+/// Pre-emphasise and scale one lapped 1920-sample analysis block.
+///
+/// Returns `CELT_ANALYSIS_GAIN · (x[m] − COEF·x[m−1])` over the block
+/// `[prev | cur]`. `x[-1]` is taken as 0; that start-up transient sits at block
+/// position 0, where [`celt_lapped_window`] is exactly zero, so it never
+/// reaches the transform.
+fn celt_preemphasised_block(prev: &[f32], cur: &[f32]) -> Vec<f32> {
+    let n = CELT_MDCT_BINS;
+    let sample = |m: usize| -> f32 {
+        if m < n {
+            prev.get(m).copied().unwrap_or(0.0)
+        } else {
+            cur.get(m - n).copied().unwrap_or(0.0)
+        }
+    };
+    (0..CELT_MDCT_BLOCK)
+        .map(|m| {
+            let prev_sample = if m == 0 { 0.0 } else { sample(m - 1) };
+            CELT_ANALYSIS_GAIN * (sample(m) - CELT_PREEMPH_COEF * prev_sample)
+        })
+        .collect()
+}
+
+/// Full CELT analysis front-end: pre-emphasis, gain and lapped MDCT.
+///
+/// This is what the conformant CELT encoder feeds to band-energy computation
+/// and PVQ shape coding. `prev` is the previous 960-sample frame (empty at
+/// stream start) and `cur` is the frame being coded.
+pub fn celt_analysis_spectrum(prev: &[f32], cur: &[f32]) -> Vec<f32> {
+    let block = celt_preemphasised_block(prev, cur);
+    celt_mdct_960_block(&block)
+}
+
+/// Forward CELT MDCT analysis of one 20 ms frame with the previous frame as
+/// overlap history.
+///
+/// This is the analysis transform whose synthesis counterpart is the reference
+/// decoder's `clt_mdct_backward` + overlap-add, i.e. the pair satisfies
+/// time-domain alias cancellation (TDAC). `prev` is the previous 960-sample
+/// frame (all zeros for the first frame); `cur` is the frame being coded. Both
+/// are zero-padded / truncated to 960 samples.
+///
+/// # Algorithm
+///
+/// 1. Window the 1920-sample lapped block `[prev | cur]` with
+///    `celt_lapped_window`.
+/// 2. Fold the four quarters `[a | b | c | d]` into `u = [−c_R − d | a − b_R]`
+///    (the standard MDCT → DCT-IV reduction).
+/// 3. Evaluate the size-960 DCT-IV with a 480-point complex FFT using the
+///    `+1/8` twiddle convention that matches the decoder's trig table.
+///
+/// # Returns
+///
+/// 960 MDCT bins (25 Hz apart at 48 kHz) in the coefficient space consumed by
+/// `denormalise_bands` in the reference decoder.
+pub fn celt_mdct_960_overlap(prev: &[f32], cur: &[f32]) -> Vec<f32> {
+    let raw: Vec<f32> = (0..CELT_MDCT_BLOCK)
+        .map(|m| {
+            if m < CELT_MDCT_BINS {
+                prev.get(m).copied().unwrap_or(0.0)
+            } else {
+                cur.get(m - CELT_MDCT_BINS).copied().unwrap_or(0.0)
+            }
+        })
+        .collect();
+    celt_mdct_960_block(&raw)
+}
+
+/// Lapped MDCT of an already-assembled 1920-sample analysis block.
+///
+/// Applies `celt_lapped_window`, folds the four quarters into the size-960
+/// DCT-IV input and evaluates it with a 480-point complex FFT.
+pub fn celt_mdct_960_block(raw: &[f32]) -> Vec<f32> {
+    const N: usize = CELT_MDCT_BINS; // 960 output bins
+    const HALF: usize = N / 2; // 480
+    const L: usize = N / 2; // FFT length
+
+    // ── 1. Window the lapped 1920-sample block ────────────────────────────────
+    let block: Vec<f32> = (0..CELT_MDCT_BLOCK)
+        .map(|m| raw.get(m).copied().unwrap_or(0.0) * celt_lapped_window(m))
+        .collect();
+
+    // ── 2. Fold [a|b|c|d] → u = [−c_R − d | a − b_R] ─────────────────────────
+    let mut u = vec![0.0f32; N];
+    for n in 0..HALF {
+        // c[HALF-1-n] = block[N + HALF - 1 - n]; d[n] = block[N + HALF + n]
+        u[n] = -block[N + HALF - 1 - n] - block[N + HALF + n];
+        // a[n] = block[n]; b[HALF-1-n] = block[HALF + HALF - 1 - n]
+        u[HALF + n] = block[n] - block[N - 1 - n];
+    }
+
+    // ── 3. DCT-IV of size N via an L-point complex FFT ───────────────────────
+    let pre: Vec<Complex<f32>> = (0..L)
+        .map(|r| {
+            let a = u[2 * r];
+            let b = u[N - 1 - 2 * r];
+            let angle = -std::f32::consts::PI * (r as f32 + 0.125) / N as f32;
+            let (sin_a, cos_a) = angle.sin_cos();
+            Complex {
+                re: a * cos_a - b * sin_a,
+                im: a * sin_a + b * cos_a,
+            }
+        })
+        .collect();
+    let spectrum = fft(&pre);
+
+    let mut out = vec![0.0f32; N];
+    for k in 0..L {
+        let angle = -std::f32::consts::PI * (k as f32 + 0.125) / N as f32;
+        let (sin_a, cos_a) = angle.sin_cos();
+        let re = spectrum[k].re * cos_a - spectrum[k].im * sin_a;
+        let im = spectrum[k].re * sin_a + spectrum[k].im * cos_a;
+        out[2 * k] = re;
+        out[N - 1 - 2 * k] = -im;
+    }
+    out
+}
+
 /// Forward CELT MDCT analysis for a single 960-sample first frame.
 ///
 /// Produces the 960 spectral coefficients in the **CELT 1920-point MDCT**
@@ -268,7 +495,39 @@ pub fn celt_mdct_960(pcm: &[f32]) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{mdct_forward, FRAME_SIZE};
+    use super::{
+        celt_mdct_960_overlap, celt_mdct_960_overlap_naive, mdct_forward, CELT_MDCT_BINS,
+        FRAME_SIZE,
+    };
+
+    /// The FFT-accelerated lapped MDCT must agree with the defining sum.
+    #[test]
+    fn test_celt_mdct_overlap_matches_naive_reference() {
+        // Deterministic pseudo-random content in both the history and the frame.
+        let mut state = 0x1234_5678u32;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 8) as f32 / (1 << 24) as f32) - 0.5
+        };
+        let prev: Vec<f32> = (0..CELT_MDCT_BINS).map(|_| next()).collect();
+        let cur: Vec<f32> = (0..CELT_MDCT_BINS).map(|_| next()).collect();
+
+        let fast = celt_mdct_960_overlap(&prev, &cur);
+        let slow = celt_mdct_960_overlap_naive(&prev, &cur);
+        assert_eq!(fast.len(), CELT_MDCT_BINS);
+        assert_eq!(slow.len(), CELT_MDCT_BINS);
+
+        let scale = slow.iter().map(|&x| x.abs()).fold(0.0f32, f32::max);
+        for k in 0..CELT_MDCT_BINS {
+            let err = (fast[k] - slow[k]).abs();
+            assert!(
+                err <= 2e-3 * scale.max(1.0),
+                "bin {k}: fast={} slow={} (err {err:.6}, scale {scale:.3})",
+                fast[k],
+                slow[k]
+            );
+        }
+    }
 
     /// Generate a sine wave at `freq_hz` Hz into a `FRAME_SIZE`-sample buffer.
     fn sine_frame(freq_hz: f32) -> Vec<f32> {
@@ -326,5 +585,49 @@ mod tests {
             ratio > 1.0 && ratio < 2000.0,
             "MDCT energy ratio {ratio:.1} is out of expected range [1, 2000]"
         );
+    }
+
+    /// Regression test: `mdct_forward` is `pub` on a `pub mod`, so any external
+    /// caller can pass a slice of the wrong length. It must return the normal
+    /// `FRAME_SIZE / 2`-length spectrum (zero-padded internally) instead of
+    /// panicking (the old behavior was a release-active `assert_eq!`).
+    #[test]
+    fn test_mdct_forward_short_input_does_not_panic() {
+        let samples = vec![0.5f32; 3]; // far shorter than FRAME_SIZE
+        let spec = mdct_forward(&samples);
+        assert_eq!(
+            spec.len(),
+            FRAME_SIZE / 2,
+            "short input must still produce a full-length spectrum"
+        );
+        assert!(
+            spec.iter().all(|x| x.is_finite()),
+            "short-input spectrum must be finite"
+        );
+    }
+
+    /// Regression test: empty input (the extreme short case) must not panic.
+    #[test]
+    fn test_mdct_forward_empty_input_does_not_panic() {
+        let spec = mdct_forward(&[]);
+        assert_eq!(spec.len(), FRAME_SIZE / 2);
+        assert!(spec.iter().all(|x| x.is_finite()));
+    }
+
+    /// Regression test: longer-than-`FRAME_SIZE` input must be truncated, not
+    /// panic.
+    #[test]
+    fn test_mdct_forward_long_input_does_not_panic() {
+        let samples = sine_frame(440.0)
+            .into_iter()
+            .chain(sine_frame(880.0))
+            .collect::<Vec<f32>>(); // 2 * FRAME_SIZE samples
+        let spec = mdct_forward(&samples);
+        assert_eq!(
+            spec.len(),
+            FRAME_SIZE / 2,
+            "over-long input must be truncated to FRAME_SIZE before transform"
+        );
+        assert!(spec.iter().all(|x| x.is_finite()));
     }
 }

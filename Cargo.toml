@@ -7,10 +7,11 @@ members = [
     "crates/oxiaudio-encode-mp3-lame",
     "crates/oxiaudio-dsp",
     "crates/oxiaudio",
+    "crates/oxiaudio-integration-tests",
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.80"
 authors = ["COOLJAPAN OU (Team Kitasan)"]
@@ -20,11 +21,11 @@ description = "OxiAudio is the COOLJAPAN Pure-Rust audio codec + DSP layer."
 
 [workspace.dependencies]
 # workspace internal
-oxiaudio-core            = { path = "crates/oxiaudio-core",            version = "0.2.0" }
-oxiaudio-decode          = { path = "crates/oxiaudio-decode",          version = "0.2.0" }
-oxiaudio-encode          = { path = "crates/oxiaudio-encode",          version = "0.2.0" }
-oxiaudio-encode-mp3-lame = { path = "crates/oxiaudio-encode-mp3-lame", version = "0.2.0" }
-oxiaudio-dsp             = { path = "crates/oxiaudio-dsp",             version = "0.2.0" }
+oxiaudio-core            = { path = "crates/oxiaudio-core",            version = "0.2.1" }
+oxiaudio-decode          = { path = "crates/oxiaudio-decode",          version = "0.2.1" }
+oxiaudio-encode          = { path = "crates/oxiaudio-encode",          version = "0.2.1" }
+oxiaudio-encode-mp3-lame = { path = "crates/oxiaudio-encode-mp3-lame", version = "0.2.1" }
+oxiaudio-dsp             = { path = "crates/oxiaudio-dsp",             version = "0.2.1" }
 # external — Pure Rust
 thiserror = { version = "2.0.18" }
 serde      = { version = "1.0.228", default-features = false, features = ["derive", "alloc"] }
@@ -36,7 +37,7 @@ rubato     = { version = "3.0.0" }
 dasp       = { version = "0.11.0", default-features = false, features = ["std"] }
 dasp_frame  = { version = "0.11.0", default-features = false, features = ["std"] }
 dasp_signal = { version = "0.11.0", default-features = false, features = ["std"] }
-oxifft     = { version = "0.3.2" }
+oxifft     = { version = "0.4.2" }
 criterion  = { version = "0.8.2" }
 rayon      = { version = "1.12.0" }
 # external — FFI (must be optional in member crates)

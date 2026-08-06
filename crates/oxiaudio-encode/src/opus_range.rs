@@ -32,6 +32,14 @@ const EC_SYM_MAX: u32 = (1u32 << EC_SYM_BITS) - 1; // 0xFF
 const EC_CODE_BITS: u32 = 32;
 const EC_CODE_TOP: u32 = 1u32 << (EC_CODE_BITS - 1); // 0x8000_0000
 const EC_CODE_BOT: u32 = EC_CODE_TOP >> EC_SYM_BITS; // 0x0080_0000
+/// Bit position of the top byte to shift out in `carry_out`.
+///
+/// Mirrors `EC_CODE_SHIFT` from libopus `celt/entcode.h`:
+/// `EC_CODE_BITS - EC_SYM_BITS - 1 = 23`.  `val` is kept in the low 31 bits,
+/// so the top byte to emit is bits `[23..=30]` — i.e. `val >> 23`, **not**
+/// `val >> 24`.  Using `>> 24` would drop bit 23 of every emitted byte,
+/// corrupting the bitstream while leaving `rng` (final range) untouched.
+const EC_CODE_SHIFT: u32 = EC_CODE_BITS - EC_SYM_BITS - 1; // 23
 const EC_UINT_BITS: u32 = 8;
 
 /// RFC 6716 range encoder (exact inverse of `EcDec`).
@@ -120,7 +128,7 @@ impl RangeEncoder {
     /// Mirrors `ec_enc_normalize()` in `celt/entenc.c`.
     fn enc_normalize(&mut self) {
         while self.rng <= EC_CODE_BOT {
-            self.carry_out((self.val >> (EC_CODE_BITS - EC_SYM_BITS)) as i32);
+            self.carry_out((self.val >> EC_CODE_SHIFT) as i32);
             // Keep only the bottom 31 bits (below EC_CODE_TOP).
             self.val = (self.val << EC_SYM_BITS) & (EC_CODE_TOP - 1);
             self.rng <<= EC_SYM_BITS;
@@ -164,17 +172,32 @@ impl RangeEncoder {
 
     /// Encode a single bit with `P(1) = 1/2^logp`.
     ///
-    /// Mirrors `ec_enc_bit_logp()` in `celt/entenc.c`.
-    /// Cross-check with `dec_bit_logp`: decoder `ret = d < s; if !ret { val -= s; rng = r-s } else { rng = s }`.
-    /// Encoder: `false` (mirror of `!ret`) adds `s`; `true` leaves `val` alone.
+    /// Mirrors `ec_enc_bit_logp()` in `celt/entenc.c` **exactly**:
+    ///
+    /// ```text
+    /// r = rng;  l = val;  s = r >> logp;  r -= s;
+    /// if value { val = l + r; }
+    /// rng = if value { s } else { r };
+    /// ```
+    ///
+    /// The Opus range coder stores symbols in *reversed* frequency order (see
+    /// [`encode`](Self::encode): `fl > 0` moves `val` **up**), so the "1" symbol
+    /// occupies `[ft-1, ft)` — the top of the frequency range — which the
+    /// decoder recognises as `val < rng>>logp`. Writing `rng = s` without the
+    /// matching `val += r` encodes the *complement*: prior to oxiaudio 0.2.1
+    /// this function emitted `!value`, which silently inverted every CELT
+    /// header flag (silence, intra, transient, skip) and every SILK VAD/LBRR
+    /// flag. `opus_range_dec::tests::roundtrip_bit_logp_is_not_inverted` pins
+    /// the corrected behaviour.
     pub fn enc_bit_logp(&mut self, value: bool, logp: u32) {
-        let r = self.rng;
-        let s = r >> logp;
+        let rng0 = self.rng;
+        let s = rng0 >> logp;
+        let r = rng0 - s;
         if value {
+            self.val = self.val.wrapping_add(r);
             self.rng = s;
         } else {
-            self.val = self.val.wrapping_add(s);
-            self.rng = r - s;
+            self.rng = r;
         }
         self.enc_normalize();
     }
@@ -226,6 +249,14 @@ impl RangeEncoder {
     /// Mirrors `ec_enc_bits()` in `celt/entenc.c`.
     /// These bits are physically placed at the back of the packet; the decoder reads
     /// them with `dec_bits()` / `read_byte_from_end()`.
+    ///
+    /// `nbits_total` **must** be advanced here, exactly as `ec_dec_bits()` does
+    /// on the decoder side: CELT's rate allocation and per-band budgets are
+    /// driven by [`tell`](Self::tell) / [`tell_frac`](Self::tell_frac), so an
+    /// encoder that "forgets" raw bits reports a smaller budget consumption
+    /// than the decoder and the two sides drift apart from the first raw-bit
+    /// field onward (fine energy). Pinned by
+    /// `opus_range_dec::tests::tell_matches_after_raw_bits`.
     pub fn enc_bits(&mut self, fval: u32, bits: u32) {
         debug_assert!(bits <= 25);
         let mask = if bits >= 32 {
@@ -240,6 +271,23 @@ impl RangeEncoder {
             self.end_window >>= EC_SYM_BITS;
             self.nend_bits -= EC_SYM_BITS as i32;
         }
+        self.nbits_total += bits as i32;
+    }
+
+    /// Bytes already committed to the **front** (range-coded) stream, including
+    /// the byte still held in the carry buffer and any deferred `0xFF` run.
+    ///
+    /// Together with [`raw_bytes`](Self::raw_bytes) this is what a CBR packer
+    /// needs to know whether a target frame size can still hold the stream:
+    /// [`finish_to_size`](Self::finish_to_size) has to drop bytes when the two
+    /// halves collide, which silently corrupts the packet.
+    pub fn range_bytes(&self) -> usize {
+        self.buf.len() + usize::from(self.rem >= 0) + self.ext as usize
+    }
+
+    /// Bytes already committed to the **back** (raw-bit) stream.
+    pub fn raw_bytes(&self) -> usize {
+        self.end_buf.len() + usize::from(self.nend_bits > 0)
     }
 
     // ── Bitstream position ────────────────────────────────────────────────────
@@ -388,7 +436,7 @@ impl RangeEncoder {
         // 2. Flush the terminating val through carry_out, shifting out one byte at a time.
         let mut l_rem = l as i32;
         while l_rem > 0 {
-            self.carry_out((end >> (EC_CODE_BITS - EC_SYM_BITS)) as i32);
+            self.carry_out((end >> EC_CODE_SHIFT) as i32);
             end = (end << EC_SYM_BITS) & (EC_CODE_TOP - 1);
             l_rem -= EC_SYM_BITS as i32;
         }
@@ -443,7 +491,28 @@ impl RangeEncoder {
     ///
     /// Mirrors the fixed-buffer contract of `ec_enc_done()` in libopus
     /// `celt/entenc.c` (BSD-3-Clause).
-    pub fn finish_to_size(mut self, target: usize) -> Vec<u8> {
+    pub fn finish_to_size(self, target: usize) -> Vec<u8> {
+        let (packet, _fit) = self.finish_to_size_checked(target);
+        packet
+    }
+
+    /// [`finish_to_size`](Self::finish_to_size) plus a flag saying whether the
+    /// stream actually fitted.
+    ///
+    /// The Opus range coder grows a range-coded stream from the front of the
+    /// packet and a raw-bit stream from the back. `ec_tell()` bounds their
+    /// combined *logical* size, but the termination flush (up to two extra
+    /// bytes) and the rounding of the raw-bit stream up to a byte boundary can
+    /// still push the two halves into each other by a couple of bytes on a
+    /// near-full CBR frame. When that happens bytes must be dropped, which
+    /// silently corrupts the packet — a standard decoder then reads different
+    /// symbols than were written.
+    ///
+    /// The second return value is `false` in exactly that case, so callers can
+    /// retry at a smaller frame size (which keeps encoder and decoder in
+    /// agreement, because the decoder derives its bit budget from the emitted
+    /// packet length) instead of shipping a corrupt frame.
+    pub fn finish_to_size_checked(mut self, target: usize) -> (Vec<u8>, bool) {
         // ── Step 1: compute range-coder termination (same as finish()) ──────────
         let mut l = EC_CODE_BITS - ec_ilog(self.rng);
         let mut msk = (EC_CODE_TOP - 1) >> l;
@@ -455,22 +524,54 @@ impl RangeEncoder {
         }
         let mut l_rem = l as i32;
         while l_rem > 0 {
-            self.carry_out((end >> (EC_CODE_BITS - EC_SYM_BITS)) as i32);
+            self.carry_out((end >> EC_CODE_SHIFT) as i32);
             end = (end << EC_SYM_BITS) & (EC_CODE_TOP - 1);
             l_rem -= EC_SYM_BITS as i32;
         }
+        // The termination wrote `l` bits into `ceil(l/8)` bytes; whatever is left
+        // over in the last of them is free (and guaranteed zero, because
+        // `end = (val + msk) & !msk` clears exactly those low bits).
+        let free_bits_in_last = (-l_rem).clamp(0, 7) as u32;
         if self.rem >= 0 || self.ext > 0 {
             self.carry_out(0);
         }
 
         // ── Step 2: build output buffer ─────────────────────────────────────────
+        //
+        // Mirrors the tail of libopus `ec_enc_done()`: the gap between the two
+        // streams is zeroed and the **partial** raw-bit window is `|=`-merged
+        // into `buf[storage - end_offs - 1]`. When a padding gap remains that
+        // index is a zero byte, so the merge is a plain store; when the two
+        // streams meet exactly it is the *last range byte*, whose low
+        // `free_bits_in_last` bits the termination left free — libopus
+        // deliberately shares that byte.
+        //
+        // Before oxiaudio 0.2.1 the partial byte was written at its own index,
+        // so a frame always needed one byte more than libopus does. Since the
+        // CELT rate allocator fills the budget to the last bit, that phantom
+        // byte made `fits` false for ~80 % of frame sizes and the CBR writer
+        // retried a byte smaller, giving up to 36 bytes/frame (≈14 kbps) of
+        // requested rate for no reason.
+        let offs = self.buf.len();
+        let end_offs = self.end_buf.len();
+        let used = self.nend_bits.clamp(0, 7) as u32;
+
+        // Fit condition, matching libopus's own error conditions:
+        //   * the two streams must not overlap (`offs + end_offs <= target`), and
+        //   * a partial window must land either in a padding byte or inside the
+        //     free low bits of the shared boundary byte.
+        let mut fits = offs + end_offs <= target && end_offs < target;
+        if fits && used > 0 && offs + end_offs == target {
+            fits = used <= free_bits_in_last;
+        }
+
         let mut out = vec![0u8; target];
 
         // Range bytes at the front (clamped to target).
-        let range_len = self.buf.len().min(target);
+        let range_len = offs.min(target);
         out[..range_len].copy_from_slice(&self.buf[..range_len]);
 
-        // End bytes at the back: end_buf[0] (first flushed) at the highest
+        // Whole end bytes at the back: end_buf[0] (first flushed) at the highest
         // address (index target-1), matching read_byte_from_end() ordering.
         let mut back = target;
         for &b in &self.end_buf {
@@ -480,13 +581,20 @@ impl RangeEncoder {
             back -= 1;
             out[back] = b;
         }
-        // Partial end byte at the next lower address.
-        if self.nend_bits > 0 && back > range_len {
-            back -= 1;
-            out[back] = (self.end_window & EC_SYM_MAX) as u8;
+
+        // Partial raw-bit window merged into the boundary byte.
+        if used > 0 && end_offs < target {
+            let idx = target - end_offs - 1;
+            let mut window = self.end_window & EC_SYM_MAX;
+            if offs + end_offs >= target && free_bits_in_last < used {
+                // Busted: keep the range-coder data intact and drop the raw bits
+                // that do not fit, exactly as libopus does.
+                window &= (1u32 << free_bits_in_last) - 1;
+            }
+            out[idx] |= window as u8;
         }
 
-        out
+        (out, fits)
     }
 }
 
@@ -511,71 +619,82 @@ fn laplace_get_freq1(fs0: u32, decay: u32) -> u32 {
     ((ft as u64 * (16_384u32.saturating_sub(decay)) as u64) >> 15) as u32
 }
 
-/// Compute the range-coder interval `(fl, fh)` for encoding a Laplace delta `qi`.
+/// Encode a Laplace-distributed coarse-energy delta into the range coder.
 ///
-/// Mirrors the inverse of `ec_laplace_decode` from libopus `celt/laplace.c`.
-/// The interval is in `[0, 32768)` (ft = 2^15).
-///
-/// - `qi = 0`:  centre peak — interval `[0, fs0)`.
-/// - `qi ≠ 0`:  walks the exponential tails to locate the correct bucket pair.
-fn laplace_sym_bounds(qi: i32, fs0: u32, decay: u32) -> (u32, u32) {
-    if qi == 0 {
-        return (0, fs0.min(32_768));
-    }
-
-    let neg = qi < 0;
-    let mag = qi.unsigned_abs();
-
-    let mut fl: u32 = fs0;
-    let mut fs_cur = laplace_get_freq1(fs0, decay) + LAPLACE_MINP;
-
-    // Advance mag-1 steps to reach the target magnitude bucket.
-    // Mirrors the while loop inside `ec_laplace_decode` in libopus.
-    let mut step = 1u32;
-    while step < mag {
-        if fs_cur <= LAPLACE_MINP {
-            // Minimum-probability tail: each remaining slot is LAPLACE_MINP wide.
-            let remaining = mag - step;
-            fl = fl.saturating_add(2 * remaining * LAPLACE_MINP);
-            fs_cur = LAPLACE_MINP;
-            break;
-        }
-        // Mirror decoder body: fs_cur *= 2; fl += fs_cur; fs_cur = decay(fs_cur)
-        fs_cur = fs_cur.saturating_mul(2);
-        fl = fl.saturating_add(fs_cur);
-        fs_cur = ((fs_cur.saturating_sub(2 * LAPLACE_MINP) as u64 * decay as u64) >> 15) as u32
-            + LAPLACE_MINP;
-        step += 1;
-    }
-
-    // Within the target magnitude bucket:
-    // negative side: [fl, fl+fs_cur),  positive side: [fl+fs_cur, fl+2*fs_cur)
-    if neg {
-        let fh = fl.saturating_add(fs_cur).min(32_768);
-        (fl, fh)
-    } else {
-        let new_fl = fl.saturating_add(fs_cur);
-        let fh = fl.saturating_add(fs_cur.saturating_mul(2)).min(32_768);
-        (new_fl, fh)
-    }
-}
-
-/// Encode a Laplace-distributed coarse energy delta into the range coder.
-///
-/// This is the encoder inverse of `ec_laplace_decode` from libopus
-/// `celt/laplace.c` (BSD-3-Clause).  The parameters `fs` and `decay` are
-/// derived from `E_PROB_MODEL` by the caller as:
+/// Exact inverse of `ec_laplace_decode` in libopus `celt/laplace.c` (and of the
+/// reference decoder's `ec_laplace_decode`): the bucket layout for magnitude
+/// `m ≥ 1` is `[fl_m, fl_m + fs_m)` for `−m` and `[fl_m + fs_m, fl_m + 2·fs_m)`
+/// for `+m`, with
 ///
 /// ```text
-/// fs    = (E_PROB_MODEL[lm][intra][2*i])   as u32 << 7
-/// decay = (E_PROB_MODEL[lm][intra][2*i+1]) as u32 << 6
+/// fl_1  = fs0,                      fs_1 = laplace_get_freq1(fs0, decay) + MINP
+/// fl_k+1 = fl_k + 2·fs_k,           fs_k+1 = ((2·fs_k − 2·MINP)·decay >> 15) + MINP
 /// ```
 ///
-/// `qi` is the signed energy delta to encode.
-pub fn ec_laplace_encode(enc: &mut RangeEncoder, qi: i32, fs: u32, decay: u32) {
-    let (fl, fh) = laplace_sym_bounds(qi, fs, decay);
-    // ft = 32768 = 2^15; use encode_bin for the power-of-two fast path.
-    enc.encode_bin(fl, fh, 15);
+/// and a minimum-probability tail (`fs == MINP`) where every further magnitude
+/// step costs exactly `2·MINP`.
+///
+/// # Returns
+///
+/// The value the decoder will actually reconstruct. The 15-bit frequency space
+/// cannot represent arbitrarily large `|qi|`, so the magnitude is **clamped**
+/// to the largest representable bucket exactly as libopus's
+/// `ec_laplace_encode` does (it writes back through its `int *value`
+/// parameter). Callers must use the returned value — not the requested one —
+/// for any state they keep in lock-step with the decoder (the coarse-energy
+/// `prev` accumulator and the fine-energy residual). Ignoring it silently
+/// desynchronises the reconstructed band energies.
+pub fn ec_laplace_encode(enc: &mut RangeEncoder, qi: i32, fs0: u32, decay: u32) -> i32 {
+    const FT: u32 = 32_768;
+    if qi == 0 {
+        enc.encode_bin(0, fs0.min(FT), 15);
+        return 0;
+    }
+    let neg = qi < 0;
+    let want = qi.unsigned_abs();
+
+    let mut fl = fs0.min(FT);
+    let mut fs_cur = laplace_get_freq1(fs0, decay) + LAPLACE_MINP;
+    let mut mag = 1u32;
+
+    // Walk the decaying part of the PDF, stopping if another level would not
+    // fit inside the 15-bit frequency space.
+    while mag < want && fs_cur > LAPLACE_MINP {
+        let doubled = fs_cur.saturating_mul(2);
+        if fl.saturating_add(doubled).saturating_add(2 * LAPLACE_MINP) >= FT {
+            break;
+        }
+        fl += doubled;
+        fs_cur = (((doubled - 2 * LAPLACE_MINP) as u64 * decay as u64) >> 15) as u32 + LAPLACE_MINP;
+        mag += 1;
+    }
+
+    // Minimum-probability tail: each further magnitude costs 2·MINP.
+    if fs_cur <= LAPLACE_MINP && mag < want {
+        let room = FT.saturating_sub(fl);
+        let steps_available = (room / (2 * LAPLACE_MINP)).saturating_sub(1);
+        let di = (want - mag).min(steps_available);
+        fl += 2 * di * LAPLACE_MINP;
+        mag += di;
+    }
+
+    let (lo, hi) = if neg {
+        (fl, fl.saturating_add(fs_cur))
+    } else {
+        (
+            fl.saturating_add(fs_cur),
+            fl.saturating_add(fs_cur.saturating_mul(2)),
+        )
+    };
+    let lo = lo.min(FT - 1);
+    let hi = hi.min(FT).max(lo + 1);
+    enc.encode_bin(lo, hi, 15);
+
+    if neg {
+        -(mag as i32)
+    } else {
+        mag as i32
+    }
 }
 
 // ── Internal utilities ────────────────────────────────────────────────────────
@@ -758,6 +877,37 @@ mod tests {
             self.nbits_total += bits as i32;
             ret
         }
+
+        /// Decode a symbol from a top-cumulative inverse CDF table.
+        ///
+        /// Ported verbatim from `ec_dec_icdf` in
+        /// `opus-decoder-0.1.1/src/entropy.rs`, the exact inverse of
+        /// [`RangeEncoder::enc_icdf`].
+        fn dec_icdf(&mut self, icdf: &[u8], ftb: u32) -> i32 {
+            let s0 = self.rng;
+            let d = self.val;
+            let r = s0 >> ftb;
+            let mut ret: i32 = -1;
+            let mut s = s0;
+            let mut t;
+            loop {
+                t = s;
+                ret += 1;
+                let idx = ret as usize;
+                if idx >= icdf.len() {
+                    self.error = true;
+                    return icdf.len() as i32 - 1;
+                }
+                s = r.wrapping_mul(icdf[idx] as u32);
+                if d >= s {
+                    break;
+                }
+            }
+            self.val = d - s;
+            self.rng = t - s;
+            self.normalize();
+            ret
+        }
     }
 
     // ── Tests ─────────────────────────────────────────────────────────────────
@@ -824,8 +974,12 @@ mod tests {
         let (bytes, enc_range) = encode_long_stream_uint(vals);
 
         let mut dec = EcDec::new(&bytes);
-        for &(_, n) in vals {
-            let _ = dec.dec_uint(n);
+        for &(v, n) in vals {
+            // Assert bit-exact value recovery, not just final_range: for a
+            // uniform coder `final_range` is symbol-value-independent, so it
+            // alone would not catch a corrupted byte stream.
+            let got = dec.dec_uint(n);
+            assert_eq!(got, v, "dec_uint({n}) recovered {got}, expected {v}");
         }
         let dec_range = dec.final_range();
         assert_eq!(
@@ -836,8 +990,9 @@ mod tests {
 
     #[test]
     fn test_ec_enc_final_range_20_symbols() {
-        // Encode 20 symbols to force multiple normalization steps; verify final_range.
-        // The final_range check is the authoritative RFC 6716 conformance criterion.
+        // Encode 20 symbols to force multiple normalization steps, then recover
+        // every symbol bit-exactly (not merely check final_range, which for a
+        // uniform coder is independent of the symbol values encoded).
         let mut enc = RangeEncoder::new();
         let symbols: &[(u32, u32, u32)] = &[
             (0, 1, 4),
@@ -868,10 +1023,10 @@ mod tests {
         let bytes = enc.finish();
 
         let mut dec = EcDec::new(&bytes);
-        for &(fl, fh, ft) in symbols {
+        for &(fl, _fh, ft) in symbols {
             let sym = dec.decode(ft);
             dec.update(sym, sym + 1, ft);
-            let _ = (sym, fl, fh); // verify no panic; actual value checked via final_range
+            assert_eq!(sym, fl, "20-symbol stream: decoded {sym}, expected {fl}");
         }
         let dec_range = dec.final_range();
         assert_eq!(
@@ -1000,6 +1155,155 @@ mod tests {
         assert_eq!(
             enc_range, dec_range,
             "repeated PVQ seq: enc={enc_range:#010x} dec={dec_range:#010x}"
+        );
+    }
+
+    // ── Bit-exact symbol-recovery round-trips ───────────────────────────────
+    //
+    // Unlike the `final_range` checks above (which only prove the encoder and
+    // decoder walked the same total interval), these tests decode every symbol
+    // back and assert it equals what was encoded — the RFC 6716 §4.1 guarantee
+    // that the range coder is losslessly invertible symbol-for-symbol.
+
+    #[test]
+    fn test_ec_range_encode_symbol_roundtrip_bitexact() {
+        // A long, varied stream of (fl, fh, ft) triples through `encode()`.
+        // Decoded via `decode()` + `update()`; every recovered symbol must match.
+        let mut symbols: Vec<(u32, u32)> = Vec::new(); // (symbol, ft)
+                                                       // Deterministic pseudo-random-ish sequence over several alphabets.
+        let alphabets = [4u32, 8, 3, 16, 5, 256, 18, 2];
+        let mut state: u32 = 0x1234_5678;
+        for i in 0..200 {
+            let ft = alphabets[i % alphabets.len()];
+            // xorshift for a spread of symbol values.
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let sym = state % ft;
+            symbols.push((sym, ft));
+        }
+
+        let mut enc = RangeEncoder::new();
+        for &(sym, ft) in &symbols {
+            enc.encode(sym, sym + 1, ft);
+        }
+        let enc_range = enc.final_range();
+        let bytes = enc.finish();
+
+        let mut dec = EcDec::new(&bytes);
+        for (i, &(sym, ft)) in symbols.iter().enumerate() {
+            let got = dec.decode(ft);
+            dec.update(got, got + 1, ft);
+            assert_eq!(
+                got, sym,
+                "symbol {i} mismatch (ft={ft}): decoded {got} expected {sym}"
+            );
+        }
+        assert!(!dec.error, "decoder flagged an error mid-stream");
+        assert_eq!(
+            enc_range,
+            dec.final_range(),
+            "final_range mismatch after bit-exact symbol recovery"
+        );
+    }
+
+    #[test]
+    fn test_ec_range_icdf_roundtrip_bitexact() {
+        // Encode a stream through `enc_icdf` and decode with `dec_icdf`.
+        // icdf tables are top-cumulative with a trailing 0 (RFC 6716 convention).
+        // ftb = 8 → ft = 256.
+        let tables: &[(&[u8], u32)] = &[
+            (&[224, 160, 96, 32, 0], 8), // 5-symbol table
+            (&[128, 0], 8),              // binary
+            (&[200, 100, 50, 20, 8, 0], 8),
+        ];
+        let mut plan: Vec<(usize, usize)> = Vec::new(); // (table_idx, symbol)
+        let mut state: u32 = 0x9E37_79B9;
+        for i in 0..180 {
+            let table_idx = i % tables.len();
+            let nsym = tables[table_idx].0.len() - 1;
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let sym = (state as usize) % nsym;
+            plan.push((table_idx, sym));
+        }
+
+        let mut enc = RangeEncoder::new();
+        for &(ti, sym) in &plan {
+            let (icdf, ftb) = tables[ti];
+            enc.enc_icdf(sym, icdf, ftb);
+        }
+        let enc_range = enc.final_range();
+        let bytes = enc.finish();
+
+        let mut dec = EcDec::new(&bytes);
+        for (i, &(ti, sym)) in plan.iter().enumerate() {
+            let (icdf, ftb) = tables[ti];
+            let got = dec.dec_icdf(icdf, ftb);
+            assert_eq!(
+                got as usize, sym,
+                "icdf symbol {i} mismatch (table {ti}): decoded {got} expected {sym}"
+            );
+        }
+        assert!(!dec.error, "decoder flagged an error mid-stream");
+        assert_eq!(
+            enc_range,
+            dec.final_range(),
+            "final_range mismatch after bit-exact icdf recovery"
+        );
+    }
+
+    #[test]
+    fn test_ec_range_mixed_roundtrip_bitexact() {
+        // Interleave range-coded symbols, uints, and end-packed raw bits, then
+        // recover all three streams bit-exactly in the same decode order.
+        let uints: &[(u32, u32)] = &[
+            (0, 1000),
+            (999, 1000),
+            (500, 1000),
+            (7, 8),
+            (0, 256),
+            (255, 256),
+            (42, 64),
+        ];
+        let raw: &[(u32, u32)] = &[(0b1011, 4), (0x1F, 5), (0xAA, 8), (0b1, 1), (0x155, 9)];
+
+        let mut enc = RangeEncoder::new();
+        // Encode all range-coded uints first, then all raw end-packed bits.
+        // `enc_uint` for ft > 256 itself end-packs low bits, so the raw-bit
+        // stream is: [uint low bits in order][explicit raw bits in order].
+        // The decoder must consume raw bits in the SAME order (FIFO), which it
+        // does by running all `dec_uint` first, then all `dec_bits`.
+        for &(v, ft) in uints {
+            enc.enc_uint(v, ft);
+        }
+        for &(v, bits) in raw {
+            enc.enc_bits(v, bits);
+        }
+        let enc_range = enc.final_range();
+        let bytes = enc.finish();
+
+        let mut dec = EcDec::new(&bytes);
+        for &(v, ft) in uints {
+            let got = dec.dec_uint(ft);
+            assert_eq!(
+                got, v,
+                "uint roundtrip: decoded {got} expected {v} (ft={ft})"
+            );
+        }
+        for &(v, bits) in raw {
+            let got = dec.dec_bits(bits);
+            assert_eq!(
+                got, v,
+                "raw-bit roundtrip: decoded {got:#x} expected {v:#x}"
+            );
+        }
+        assert!(!dec.error, "decoder flagged an error mid-stream");
+        assert_eq!(
+            enc_range,
+            dec.final_range(),
+            "final_range mismatch after mixed bit-exact recovery"
         );
     }
 }

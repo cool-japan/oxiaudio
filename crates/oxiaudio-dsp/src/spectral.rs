@@ -81,20 +81,28 @@ fn stft_with_cached_plan(
     let mut spectrogram = Vec::with_capacity(num_frames);
 
     FFT_PLAN_CACHE.with(|cache| {
-        // Ensure a plan exists for this window size.
+        // Ensure a plan exists for this window size. `Plan::dft_1d` returns `Some`
+        // for every non-zero size we reach here, but we handle `None` gracefully
+        // rather than panicking so that no input can ever abort the process.
         {
             let mut map = cache.borrow_mut();
-            map.entry(window_size).or_insert_with(|| {
-                // Plan::dft_1d always returns Some for valid sizes.
-                Plan::<f32>::dft_1d(window_size, Direction::Forward, Flags::ESTIMATE)
-                    .expect("Plan::dft_1d returned None for non-zero window_size")
-            });
+            if let std::collections::hash_map::Entry::Vacant(entry) = map.entry(window_size) {
+                match Plan::<f32>::dft_1d(window_size, Direction::Forward, Flags::ESTIMATE) {
+                    Some(plan) => {
+                        entry.insert(plan);
+                    }
+                    None => return,
+                }
+            }
         }
 
-        // Borrow the plan and compute all frames.
+        // Borrow the plan and compute all frames. The entry was just inserted or
+        // already present; if it is somehow absent we return an empty result.
         let map = cache.borrow();
-        // The entry was just inserted above, so this expect cannot fail.
-        let plan = map.get(&window_size).expect("plan was just inserted");
+        let plan = match map.get(&window_size) {
+            Some(plan) => plan,
+            None => return,
+        };
 
         let mut input = vec![Complex::<f32>::new(0.0, 0.0); window_size];
         let mut output = vec![Complex::<f32>::new(0.0, 0.0); window_size];

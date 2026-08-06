@@ -29,9 +29,3 @@ opus-decoder   = { workspace = true, optional = true }
 
 [dev-dependencies]
 hound           = { workspace = true }
-criterion       = { workspace = true }
-oxiaudio-encode = { workspace = true }
-
-[[bench]]
-name = "decode_bench"
-harness = false

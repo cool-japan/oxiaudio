@@ -138,11 +138,38 @@ fn i24_be_to_i32(b: &[u8; 3]) -> i32 {
 ///
 /// PCM data is already positioned at the start of the SSND payload
 /// (after the 8-byte offset/blockAlign header has been consumed).
+///
+/// `available_bytes` is the number of bytes actually remaining in the stream
+/// from the start of the PCM payload onward. It bounds the pre-allocation so
+/// that a crafted COMM header (`num_frames * num_channels` far larger than
+/// the file can possibly contain) cannot force a multi-gigabyte/petabyte
+/// allocation attempt before a single byte of PCM data is read.
 fn decode_pcm_samples<R: Read>(
     reader: &mut R,
     comm: &CommChunk,
+    available_bytes: u64,
 ) -> Result<Vec<f32>, OxiAudioError> {
     let total_samples = comm.num_frames as usize * comm.num_channels as usize;
+
+    let bytes_per_sample: u64 = match comm.bit_depth {
+        8 => 1,
+        16 => 2,
+        24 => 3,
+        d => {
+            return Err(OxiAudioError::UnsupportedFormat(format!(
+                "AIFF bit depth {d} is not supported (supported: 8, 16, 24)"
+            )));
+        }
+    };
+
+    let required_bytes = (total_samples as u64).saturating_mul(bytes_per_sample);
+    if required_bytes > available_bytes {
+        return Err(OxiAudioError::Decode(format!(
+            "AIFF: COMM declares {total_samples} samples ({required_bytes} bytes) but only \
+             {available_bytes} bytes remain in the SSND chunk"
+        )));
+    }
+
     let mut samples = Vec::with_capacity(total_samples);
 
     match comm.bit_depth {
@@ -290,11 +317,17 @@ fn decode_aiff_inner<R: Read + Seek>(
     }
 
     // ── Decode PCM ─────────────────────────────────────────────────────────────
+    // Determine how many bytes actually remain in the stream from the PCM
+    // payload onward, so a crafted COMM header (huge num_frames * num_channels)
+    // cannot force an oversized allocation before we know the data exists.
+    let stream_end = reader.seek(SeekFrom::End(0)).map_err(OxiAudioError::Io)?;
+    let available_bytes = stream_end.saturating_sub(ssnd.data_start);
+
     reader
         .seek(SeekFrom::Start(ssnd.data_start))
         .map_err(OxiAudioError::Io)?;
 
-    let samples = decode_pcm_samples(reader, &comm)?;
+    let samples = decode_pcm_samples(reader, &comm, available_bytes)?;
 
     let layout = ChannelLayout::from(comm.num_channels);
 
@@ -599,12 +632,25 @@ pub fn decode_aiffc_compressed<R: Read + Seek>(
         )));
     }
 
+    // Determine how many bytes actually remain in the stream from the audio
+    // payload onward, so a crafted COMM header (huge num_frames * num_channels)
+    // cannot force an oversized allocation before we know the data exists.
+    let stream_end = reader.seek(SeekFrom::End(0)).map_err(OxiAudioError::Io)?;
+    let available_bytes = stream_end.saturating_sub(ssnd_start);
+
     // Seek to audio data and decode.
     reader
         .seek(SeekFrom::Start(ssnd_start))
         .map_err(OxiAudioError::Io)?;
 
     let total_samples = comm.num_frames as usize * comm.num_channels as usize;
+    // µ-law/A-law samples are exactly one byte each.
+    if (total_samples as u64) > available_bytes {
+        return Err(OxiAudioError::Decode(format!(
+            "AIFF-C: COMM declares {total_samples} samples but only {available_bytes} bytes \
+             remain in the SSND chunk"
+        )));
+    }
     let mut samples = Vec::with_capacity(total_samples);
 
     let mut byte_buf = [0u8; 1];
@@ -856,5 +902,21 @@ mod aiffc_tests {
         let mut cursor = Cursor::new(data);
         let buf = decode_aiffc_compressed(&mut cursor).expect("stereo ulaw");
         assert_eq!(buf.samples.len(), 4, "2 channels * 2 frames = 4 samples");
+    }
+
+    /// Regression test: a COMM chunk claiming a huge `numSampleFrames` while the
+    /// SSND chunk actually contains almost no audio data must be rejected with a
+    /// typed decode error, not attempt a multi-gigabyte allocation.
+    #[test]
+    fn test_decode_aiffc_huge_comm_frame_count_rejected_not_oom() {
+        // Claim ~4.29 billion mono µ-law frames but only supply 1 real byte.
+        let raw_bytes: Vec<u8> = vec![0xFF];
+        let data = build_aiffc(1, 8000, u32::MAX, b"ulaw", &raw_bytes);
+        let mut cursor = Cursor::new(data);
+        let result = decode_aiffc_compressed(&mut cursor);
+        assert!(
+            result.is_err(),
+            "huge COMM frame count with tiny SSND data must be rejected, not panic/OOM"
+        );
     }
 }

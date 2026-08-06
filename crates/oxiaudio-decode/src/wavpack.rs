@@ -685,6 +685,17 @@ pub fn decode_wavpack(data: &[u8]) -> Result<AudioBuffer<f32>, OxiAudioError> {
             ));
         }
 
+        // `block_size` is defined by the spec as the total block size minus the
+        // first 8 bytes (magic + this field), so the real block spans
+        // `block_size + 8` bytes and must be at least the 32-byte header itself.
+        // A crafted `block_size < 24` would make `pos + 32 > block_end` below,
+        // causing a slice-range panic; reject such blocks instead.
+        if hdr.block_size < 24 {
+            return Err(OxiAudioError::Decode(format!(
+                "WavPack: block_size {} at offset {pos} is smaller than the 32-byte header",
+                hdr.block_size
+            )));
+        }
         let block_end = pos + hdr.block_size as usize + 8;
         // Clamp to available data
         let block_end = block_end.min(data.len());
@@ -693,7 +704,29 @@ pub fn decode_wavpack(data: &[u8]) -> Result<AudioBuffer<f32>, OxiAudioError> {
         if !total_samples_known && hdr.total_samples != 0xFFFF_FFFF {
             total_samples_known = true;
             channels = if hdr.is_mono { 1 } else { 2 };
-            all_samples.reserve(hdr.total_samples as usize * channels);
+
+            // Sanity-check `total_samples` (taken directly from the untrusted
+            // 32-bit block header field) against the bytes actually remaining
+            // in the stream from this block onward. WavPack is lossless;
+            // even pathologically compressible content (e.g. long runs of
+            // digital silence) rarely exceeds a few hundred samples per
+            // remaining byte, so a generous per-byte multiplier plus a floor
+            // keeps small legitimate files intact while rejecting a crafted
+            // total_samples field (up to ~4.29 billion, ~34 GB once
+            // multiplied by channels and f32 size) that claims far more
+            // samples than the stream could possibly hold, before an
+            // unbounded `Vec::reserve` is attempted.
+            let remaining_bytes = data.len().saturating_sub(pos) as u64;
+            let max_plausible_samples = remaining_bytes.saturating_mul(1024).max(1_000_000);
+            if u64::from(hdr.total_samples) > max_plausible_samples {
+                return Err(OxiAudioError::Decode(format!(
+                    "WavPack: header claims {} total samples but only {remaining_bytes} bytes \
+                     remain in the stream",
+                    hdr.total_samples
+                )));
+            }
+
+            all_samples.reserve((hdr.total_samples as usize).saturating_mul(channels));
         }
 
         // Try to extract sample rate from embedded RIFF header
@@ -967,5 +1000,37 @@ mod tests {
         // block_size as stored is the raw field; pos advance = block_size + 8
         let advance = (hdr.block_size as usize).max(32).saturating_add(8);
         assert!(advance >= 32, "advance must be at least header size");
+    }
+
+    #[test]
+    fn test_wavpack_undersized_block_size_rejected_not_panicking() {
+        // A crafted block_size field smaller than the minimum valid value (24)
+        // used to make `block_end < pos + 32`, causing a slice-range panic in
+        // `decode_wavpack`. It must now be rejected with a typed decode error.
+        let flags = FLAG_MONO_DATA | 0x0001;
+        let mut hdr_bytes = make_minimal_wvpk_header(0, flags, 0);
+        // Overwrite the stored block_size field with 0 (well below the 24 minimum).
+        hdr_bytes[4..8].copy_from_slice(&0u32.to_le_bytes());
+        let result = decode_wavpack(&hdr_bytes);
+        assert!(
+            matches!(result, Err(OxiAudioError::Decode(_))),
+            "undersized block_size must be rejected with a Decode error"
+        );
+    }
+
+    #[test]
+    fn test_wavpack_huge_total_samples_rejected_not_oom() {
+        // A crafted total_samples field claiming ~4.29 billion samples while
+        // the file is just the 32-byte header itself must be rejected with a
+        // typed decode error instead of driving an unbounded
+        // `Vec::reserve(total_samples * channels)` (up to ~34 GB).
+        let flags = FLAG_MONO_DATA | 0x0001;
+        let mut hdr_bytes = make_minimal_wvpk_header(0, flags, 0);
+        hdr_bytes[12..16].copy_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
+        let result = decode_wavpack(&hdr_bytes);
+        assert!(
+            matches!(result, Err(OxiAudioError::Decode(_))),
+            "huge total_samples with a tiny file must be rejected, not OOM"
+        );
     }
 }

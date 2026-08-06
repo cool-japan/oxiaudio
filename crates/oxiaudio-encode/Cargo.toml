@@ -11,6 +11,9 @@ categories = ["multimedia::audio"]
 keywords = ["audio", "encode", "wav", "flac", "pure-rust"]
 readme = "README.md"
 
+[features]
+silk_debug = []
+
 [dependencies]
 oxiaudio-core = { workspace = true }
 hound = { workspace = true }

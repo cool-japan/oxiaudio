@@ -133,3 +133,55 @@ fn silk_encode_is_deterministic() {
         "repeated encode of same PCM must produce identical packets"
     );
 }
+
+/// A real (non-silent) tone must decode to a signal with meaningful energy —
+/// the encoder codes actual excitation, not a silence stub.
+#[test]
+fn silk_tone_decodes_with_energy() {
+    let pcm = sine_1khz_20ms();
+    let packet = encode_silk_frame_conformant(&pcm, 1);
+    let (n, out) = decode_packet(&packet).expect("decode must succeed");
+    assert_eq!(n, 960);
+    let energy: f32 = out.iter().map(|&x| x * x).sum();
+    assert!(
+        energy > 1e-3,
+        "decoded tone must carry real energy, got {energy}"
+    );
+}
+
+/// The decoded band-limited tone must be positively correlated with the input
+/// after accounting for the ~6.5 ms SILK/resampler group delay, demonstrating
+/// the encoder reproduces the spectral content (not just random energy).
+#[test]
+fn silk_tone_is_correlated_with_input() {
+    let pcm = sine_1khz_20ms();
+    let packet = encode_silk_frame_conformant(&pcm, 1);
+    let (_, out) = decode_packet(&packet).expect("decode must succeed");
+
+    // Search a small delay window for the best correlation (the SILK internal
+    // resampler introduces a fixed group delay).
+    let best = (0..320)
+        .map(|d| {
+            let mut num = 0.0f64;
+            let mut a = 0.0f64;
+            let mut b = 0.0f64;
+            for i in d..960 {
+                let x = pcm[i - d] as f64;
+                let y = out[i] as f64;
+                num += x * y;
+                a += x * x;
+                b += y * y;
+            }
+            if a > 0.0 && b > 0.0 {
+                num / (a * b).sqrt()
+            } else {
+                0.0
+            }
+        })
+        .fold(f64::MIN, f64::max);
+
+    assert!(
+        best > 0.3,
+        "decoded tone must correlate with the input (best corr = {best:.3})"
+    );
+}

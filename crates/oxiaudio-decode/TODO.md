@@ -1,7 +1,12 @@
 # oxiaudio-decode TODO
 
 ## Status
-Symphonia-backed decoder supporting WAV, MP3, FLAC, Vorbis, AAC, ALAC, and PCM via feature flags. Implements full-file decode (`SymphoniaDecoder`), format probing (`detect_format`), metadata extraction (`decode_with_metadata` with title/artist/album/duration), streaming decode (`StreamingDecoder` with FIFO, seek support, and `AudioSource` trait impl), and multi-track selection. M0-M3 complete, M4 benchmarks done. Approximately 507 SLOC including tests/benchmarks.
+Symphonia-backed decoder supporting WAV, MP3, FLAC, Vorbis, AAC, ALAC, and PCM via feature flags. Implements full-file decode (`SymphoniaDecoder`), format probing (`detect_format`), metadata extraction (`decode_with_metadata` with title/artist/album/duration), streaming decode (`StreamingDecoder` with FIFO, seek support, and `AudioSource` trait impl), and multi-track selection. M0–M23 complete — beyond the Symphonia path the crate ships native
+pure-Rust AIFF/AIFF-C, AU/SND, WavPack, Musepack SV7/SV8, AAC/ADTS, MIDI (SMF 0/1/2) and Opus
+readers, plus APEv2 tags, cue points, ReplayGain, gapless (LAME) and artwork extraction.
+8,273 SLOC of production code across 19 source files in `src/` (`tokei crates/oxiaudio-decode/src`,
+Code column, measured 2026-08-06); 226 tests passing with default features, 234 with
+`--all-features`.
 
 ## Core Implementation
 

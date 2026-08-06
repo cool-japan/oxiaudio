@@ -28,7 +28,8 @@ use crate::opus_range::RangeEncoder;
 /// - `overflowed` is `true` if any u32 addition overflowed during computation.
 ///
 /// When `overflowed` is true, the `v` and `u` values are unreliable.
-/// Callers should fall back to [`ncwrs_urow_u64`] in that case.
+/// The `overflowed` flag is informational only — [`encode_pulses`] intentionally
+/// uses the wrapping value regardless, because the reference decoder does.
 ///
 /// Matches `ncwrs_urow()` in the reference cwrs.rs exactly:
 /// - Initializes `u[0]=0, u[1]=1, u[i]=2i-1` for i≥2.
@@ -171,9 +172,14 @@ pub(crate) fn icwrs(y: &[i32]) -> (u32, u32) {
 
 /// Compute the U-row for dimension `n` with `k+2` entries using u64 arithmetic.
 ///
-/// This is the wide-path fallback used when `ncwrs_urow` (u32) would overflow.
+/// Wide-precision reference used by the test suite to cross-check that the
+/// production `u32` (wrapping) path computes `V(N, K)` correctly for every
+/// `(N, K)` a valid Opus stream can request. The production encoder deliberately
+/// does **not** fall back to this: the reference decoder has no wide path, so
+/// using one would desynchronise the bitstream (see [`encode_pulses`]).
 /// Returns `(u, v)` where `u[i] = U(n,i)` and `v = V(n,k)` as u64 values.
 /// If `v` overflows u64, it is clamped to `u64::MAX` (signals skip to caller).
+#[cfg(test)]
 pub(crate) fn ncwrs_urow_u64(n: usize, k: usize) -> (Vec<u64>, u64) {
     let len = k + 2;
     let mut u = vec![0u64; len];
@@ -192,6 +198,7 @@ pub(crate) fn ncwrs_urow_u64(n: usize, k: usize) -> (Vec<u64>, u64) {
 }
 
 /// Advance U-row using u64 arithmetic; saturates rather than wrapping.
+#[cfg(test)]
 fn unext_sub1_u64(u: &mut [u64]) {
     if u.len() < 3 {
         return;
@@ -208,6 +215,7 @@ fn unext_sub1_u64(u: &mut [u64]) {
 }
 
 /// Step U-row backward one dimension using u64 arithmetic.
+#[cfg(test)]
 fn uprev_urow_u64(u: &mut [u64]) {
     if u.len() < 2 {
         return;
@@ -224,8 +232,9 @@ fn uprev_urow_u64(u: &mut [u64]) {
 
 /// Convert signed pulse vector `y` to a CWRS index using u64 arithmetic.
 ///
-/// Wide-path fallback used when V(N,K) > u32::MAX.
+/// Wide-precision reference used by the test suite only; see `ncwrs_urow_u64`.
 /// Returns `(index, yy)` where `index` is in `[0, V(n,k))` as u64.
+#[cfg(test)]
 pub(crate) fn icwrs_u64(y: &[i32]) -> (u64, u32) {
     let n = y.len();
     if n == 0 {
@@ -275,48 +284,45 @@ pub(crate) fn icwrs_u64(y: &[i32]) -> (u64, u32) {
 
 /// Encode signed pulse vector `y` into the range encoder using CWRS combinatorics.
 ///
-/// Bit-exact encoder-side counterpart of `decode_pulses` in the reference cwrs.rs.
+/// Exact encoder-side counterpart of `decode_pulses` in libopus `celt/cwrs.c`
+/// and in the reference decoder: that side computes `V(N, K)` with **wrapping**
+/// `u32` arithmetic and reads `ec_dec_uint(nc.max(2))`, with no wide fallback of
+/// any kind. This function therefore does exactly the same — a `u64` fallback
+/// here would write a symbol over a different total than the decoder reads and
+/// desynchronise the bitstream, which is precisely the failure mode the
+/// `final_range` conformance test exists to catch.
 ///
-/// # Overflow handling
+/// `V(N, K)` fits comfortably in `u32` for every `(N, K)` a valid Opus stream
+/// can request, because `celt_bits2pulses` caps `K` from the pulse-cache table;
+/// the `.max(2)` mirrors the decoder's own guard for the degenerate `N == 1`
+/// case.
 ///
-/// For large `N*K` values where V(N,K) overflows u32, this function automatically
-/// falls back to a u64-wide path (`ncwrs_urow_u64` / `icwrs_u64` /
-/// `enc_uint_u64`). Only when V(N,K) overflows u64 (extremely large bands,
-/// N*K ≫ 10^15) is the band silently skipped — in practice this never occurs
-/// in standard Opus streams (CELT bands top out at N≈22, K≈88).
-pub(crate) fn encode_pulses(enc: &mut RangeEncoder, y: &[i32]) {
+/// # Returns
+///
+/// `true` when the wrapping `V(N, K)` computation overflowed `u32`. The
+/// bitstream stays synchronised in that case — the decoder wraps identically
+/// and both sides code the symbol over the same total — but the reconstructed
+/// shape for that leaf is not the one the search selected, so the flag is
+/// surfaced through [`CeltEncodeTrace`](crate::opus_celt::CeltEncodeTrace)
+/// rather than discarded.
+pub(crate) fn encode_pulses(enc: &mut RangeEncoder, y: &[i32]) -> bool {
     let n = y.len();
     if n == 0 {
-        return;
+        return false;
     }
     let k: u32 = y.iter().map(|v| v.unsigned_abs()).sum();
     if k == 0 {
-        return;
+        return false;
     }
-
-    // First try the fast u32 path (with overflow detection).
-    let (_u32_row, v32, overflowed) = ncwrs_urow(n, k as usize);
-    if !overflowed && v32 >= 2 {
-        // u32 path is valid — no overflow.
-        let (index, _yy) = icwrs(y);
-        if index < v32 {
-            enc.enc_uint(index, v32);
-        }
-        // If index >= v32, there's a logic error in icwrs; silently skip.
-        return;
-    }
-
-    // u32 path overflowed. Try the u64 wide path.
-    let (_u64_row, v64) = ncwrs_urow_u64(n, k as usize);
-    // v64 == u64::MAX means saturation (overflow beyond u64 range); skip.
-    if v64 < 2 || v64 == u64::MAX {
-        return;
-    }
-    let (index64, _yy) = icwrs_u64(y);
-    if index64 < v64 {
-        enc.enc_uint_u64(index64, v64);
-    }
-    // If index64 >= v64, silently skip (logic error guard).
+    let (_u_row, v32, overflowed) = ncwrs_urow(n, k as usize);
+    let ft = v32.max(2);
+    let (index, _yy) = icwrs(y);
+    // `icwrs` is the exact inverse of the decoder's `cwrsi` over the same
+    // wrapping U-row, so `index < ft` always holds for a well-formed `y`; the
+    // modulo keeps a malformed input from producing an invalid symbol range
+    // rather than silently writing nothing (which would desynchronise).
+    enc.enc_uint(index % ft, ft);
+    overflowed
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
