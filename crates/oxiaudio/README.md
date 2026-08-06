@@ -12,11 +12,11 @@ Decoding (WAV/RF64, FLAC, MP3, OGG Vorbis, AAC/M4A, AIFF/AIFF-C, OGG Opus) is Pu
 ```toml
 [dependencies]
 # Pure-Rust decode + encode + DSP (default):
-oxiaudio = "0.2.1"
+oxiaudio = "0.2.2"
 
 # MP3 *encoding* (LAME, LGPL FFI) is NOT in this pure facade — there is no
 # `mp3-encode-lame` feature here. Add the quarantine crate directly if you need it:
-# oxiaudio-encode-mp3-lame = { version = "0.2.1", features = ["mp3-encode-lame"] }
+# oxiaudio-encode-mp3-lame = { version = "0.2.2", features = ["mp3-encode-lame"] }
 ```
 
 ## Quick Start

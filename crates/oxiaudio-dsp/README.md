@@ -11,10 +11,10 @@ The crate is `#![forbid(unsafe_code)]` and **100% Pure Rust**. High-quality resa
 
 ```toml
 [dependencies]
-oxiaudio-dsp = "0.2.1"
+oxiaudio-dsp = "0.2.2"
 
 # With the dasp::Signal adapter (MonoSignal / StereoSignal):
-oxiaudio-dsp = { version = "0.2.1", features = ["dasp"] }
+oxiaudio-dsp = { version = "0.2.2", features = ["dasp"] }
 ```
 
 ## Quick Start

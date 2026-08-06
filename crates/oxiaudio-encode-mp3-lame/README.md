@@ -16,10 +16,10 @@
 ```toml
 [dependencies]
 # ReplayGain helper only — Pure Rust, no LAME linkage:
-oxiaudio-encode-mp3-lame = "0.2.1"
+oxiaudio-encode-mp3-lame = "0.2.2"
 
 # Full LAME MP3 encoding (LGPL, FFI):
-oxiaudio-encode-mp3-lame = { version = "0.2.1", features = ["mp3-encode-lame"] }
+oxiaudio-encode-mp3-lame = { version = "0.2.2", features = ["mp3-encode-lame"] }
 ```
 
 This crate is **not** reachable through the `oxiaudio` facade — the facade has no
@@ -27,8 +27,8 @@ This crate is **not** reachable through the `oxiaudio` facade — the facade has
 facade, when you need MP3 encoding:
 
 ```toml
-oxiaudio = "0.2.1"
-oxiaudio-encode-mp3-lame = { version = "0.2.1", features = ["mp3-encode-lame"] }
+oxiaudio = "0.2.2"
+oxiaudio-encode-mp3-lame = { version = "0.2.2", features = ["mp3-encode-lame"] }
 ```
 
 ## Quick Start

@@ -2,7 +2,7 @@
 
 Pure-Rust audio processing workspace: decode, encode, DSP effects, and spectral analysis.
 
-**Version:** 0.2.1 | **MSRV:** 1.80 | **License:** Apache-2.0
+**Version:** 0.2.2 | **MSRV:** 1.80 | **License:** Apache-2.0
 
 ## Format Support
 

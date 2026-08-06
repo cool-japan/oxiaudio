@@ -11,10 +11,10 @@ This crate carries no MP3 encoder. MP3 encoding is opt-in via the separate `oxia
 
 ```toml
 [dependencies]
-oxiaudio-encode = "0.2.1"
+oxiaudio-encode = "0.2.2"
 
 # MP3 encoding is NOT in this crate; depend on `oxiaudio-encode-mp3-lame` directly:
-# oxiaudio-encode-mp3-lame = { version = "0.2.1", features = ["mp3-encode-lame"] }
+# oxiaudio-encode-mp3-lame = { version = "0.2.2", features = ["mp3-encode-lame"] }
 ```
 
 ## Quick Start
